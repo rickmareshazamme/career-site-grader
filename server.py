@@ -47,7 +47,7 @@ def grade():
 
         while True:
             try:
-                item = q.get(timeout=30)
+                item = q.get(timeout=60)
             except queue.Empty:
                 yield f"data: {json.dumps({'type': 'error', 'message': 'Timeout waiting for analysis'})}\n\n"
                 break

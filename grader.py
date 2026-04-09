@@ -47,9 +47,10 @@ class CareerSiteGrader:
 
         success = await self._fetch_main_page()
         if not success:
+            err_detail = self.errors[-1] if self.errors else 'Unknown error'
             yield {
                 'type': 'error',
-                'message': f'Could not connect to {self.url}. Please check the URL and try again.',
+                'message': f'Could not analyse the site: {err_detail}',
             }
             return
 
@@ -122,7 +123,7 @@ class CareerSiteGrader:
             ssl_ctx.check_hostname = False
             ssl_ctx.verify_mode = ssl.CERT_NONE
             connector = aiohttp.TCPConnector(ssl=ssl_ctx)
-            timeout = aiohttp.ClientTimeout(total=20)
+            timeout = aiohttp.ClientTimeout(total=45, sock_read=30)
             start = time.time()
             async with aiohttp.ClientSession(connector=connector, timeout=timeout) as sess:
                 async with sess.get(self.url, headers=self.HEADERS, allow_redirects=True) as resp:
