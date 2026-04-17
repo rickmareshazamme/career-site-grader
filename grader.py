@@ -352,38 +352,72 @@ class CareerSiteGrader:
                         'value': h1_text[:80] if h1_text else None})
         score += pts; max_score += 10
 
-        # --- Schema Markup ---
+        # --- Schema Markup --- (mode-specific)
         schema_types = self._get_schema_types()
-        has_job_schema = any(t in ['JobPosting'] for t in schema_types)
-        has_org_schema = any(t in ['Organization', 'Corporation', 'EmploymentAgency',
-                                    'StaffingAgency', 'LocalBusiness', 'RecruitmentAgency'] for t in schema_types)
-        has_faq_schema = 'FAQPage' in schema_types
-        has_breadcrumb = 'BreadcrumbList' in schema_types
         has_any_schema = bool(schema_types)
 
-        sch_pts = 0
-        sch_notes = []
-        if has_any_schema:
-            sch_pts += 5
-            unique_types = list(dict.fromkeys(schema_types))[:6]
-            sch_notes.append(f'Types: {", ".join(unique_types)}')
-        else:
-            sch_notes.append('No structured data found')
-        if has_org_schema:
-            sch_pts += 7; sch_notes.append('Organization ✓')
-        else:
-            sch_notes.append('Missing Organization/StaffingAgency schema')
-        if has_job_schema:
-            sch_pts += 8; sch_notes.append('JobPosting ✓')
-        if has_faq_schema:
-            sch_pts += 3; sch_notes.append('FAQPage ✓')
-        if has_breadcrumb:
-            sch_pts += 2; sch_notes.append('BreadcrumbList ✓')
-        sch_pts = min(sch_pts, 25)
-        checks.append({'name': 'Schema / Structured Data', 'weight': 25, 'score': sch_pts, 'max': 25,
-                        'status': self._pts_status(sch_pts, 25), 'detail': ' | '.join(sch_notes),
+        if self.mode == 'recruitment':
+            has_job_schema = any(t in ['JobPosting'] for t in schema_types)
+            has_org_schema = any(t in ['Organization', 'Corporation', 'EmploymentAgency',
+                                        'StaffingAgency', 'LocalBusiness', 'RecruitmentAgency'] for t in schema_types)
+            has_faq_schema = 'FAQPage' in schema_types
+            has_breadcrumb = 'BreadcrumbList' in schema_types
+            sch_pts = 0; sch_notes = []
+            if has_any_schema:
+                sch_pts += 5; unique_types = list(dict.fromkeys(schema_types))[:6]
+                sch_notes.append(f'Types: {", ".join(unique_types)}')
+            else:
+                sch_notes.append('No structured data found')
+            if has_org_schema: sch_pts += 7; sch_notes.append('Organization ✓')
+            else: sch_notes.append('Missing Organization/StaffingAgency schema')
+            if has_job_schema: sch_pts += 8; sch_notes.append('JobPosting ✓')
+            if has_faq_schema: sch_pts += 3; sch_notes.append('FAQPage ✓')
+            if has_breadcrumb: sch_pts += 2; sch_notes.append('BreadcrumbList ✓')
+            sch_pts = min(sch_pts, 25)
+            sch_max = 25
+
+        elif self.mode == 'career_site':
+            has_job_schema = any(t in ['JobPosting'] for t in schema_types)
+            has_org_schema = any(t in ['Organization', 'Corporation'] for t in schema_types)
+            has_breadcrumb = 'BreadcrumbList' in schema_types
+            has_faq_schema = 'FAQPage' in schema_types
+            sch_pts = 0; sch_notes = []
+            if has_any_schema:
+                sch_pts += 2; unique_types = list(dict.fromkeys(schema_types))[:6]
+                sch_notes.append(f'Types: {", ".join(unique_types)}')
+            else:
+                sch_notes.append('No structured data found')
+            if has_job_schema: sch_pts += 10; sch_notes.append('JobPosting ✓')
+            else: sch_notes.append('Missing JobPosting schema — critical for career sites')
+            if has_org_schema: sch_pts += 7; sch_notes.append('Organization ✓')
+            if has_breadcrumb: sch_pts += 3; sch_notes.append('BreadcrumbList ✓')
+            if has_faq_schema: sch_pts += 3; sch_notes.append('FAQPage ✓')
+            sch_pts = min(sch_pts, 25)
+            sch_max = 25
+
+        else:  # general
+            has_job_schema = False
+            has_org_schema = any(t in ['Organization', 'Corporation', 'LocalBusiness'] for t in schema_types)
+            has_breadcrumb = 'BreadcrumbList' in schema_types
+            has_faq_schema = 'FAQPage' in schema_types
+            sch_pts = 0; sch_notes = []
+            if has_any_schema:
+                sch_pts += 5; unique_types = list(dict.fromkeys(schema_types))[:6]
+                sch_notes.append(f'Types: {", ".join(unique_types)}')
+            else:
+                sch_notes.append('No structured data found')
+            if has_org_schema: sch_pts += 5; sch_notes.append('Organization ✓')
+            if has_breadcrumb: sch_pts += 3; sch_notes.append('BreadcrumbList ✓')
+            if has_faq_schema: sch_pts += 2; sch_notes.append('FAQPage ✓')
+            has_local = 'LocalBusiness' in schema_types
+            if has_local: sch_pts += 3; sch_notes.append('LocalBusiness ✓')
+            sch_pts = min(sch_pts, 18)
+            sch_max = 18
+
+        checks.append({'name': 'Schema / Structured Data', 'weight': sch_max, 'score': sch_pts, 'max': sch_max,
+                        'status': self._pts_status(sch_pts, sch_max), 'detail': ' | '.join(sch_notes),
                         'value': f'{len(schema_types)} schema type(s) detected'})
-        score += sch_pts; max_score += 25
+        score += sch_pts; max_score += sch_max
 
         # --- Open Graph ---
         og_title  = soup.find('meta', property='og:title')
@@ -426,27 +460,40 @@ class CareerSiteGrader:
                         'status': self._pts_status(pts, 7), 'detail': note})
         score += pts; max_score += 7
 
-        # --- Heading hierarchy ---
+        # --- Heading hierarchy --- (shared, different max for general)
         h2s = len(soup.find_all('h2'))
         h3s = len(soup.find_all('h3'))
+        heading_max = 7 if self.mode == 'general' else 10
         if h2s >= 4:
-            pts, note = 10, f'{h2s} H2s, {h3s} H3s — strong content structure'
+            pts, note = heading_max, f'{h2s} H2s, {h3s} H3s — strong content structure'
         elif h2s >= 2:
-            pts, note = 7, f'{h2s} H2s, {h3s} H3s — decent structure'
+            pts, note = round(heading_max * 0.7), f'{h2s} H2s, {h3s} H3s — decent structure'
         elif h2s == 1:
-            pts, note = 4, f'Only 1 H2 — more subheadings would improve structure'
+            pts, note = round(heading_max * 0.4), f'Only 1 H2 — more subheadings would improve structure'
         else:
             pts, note = 0, 'No H2 subheadings — flat structure hurts SEO and readability'
-        checks.append({'name': 'Heading Hierarchy', 'weight': 10, 'score': pts, 'max': 10,
-                        'status': self._pts_status(pts, 10), 'detail': note})
-        score += pts; max_score += 10
+        checks.append({'name': 'Heading Hierarchy', 'weight': heading_max, 'score': pts, 'max': heading_max,
+                        'status': self._pts_status(pts, heading_max), 'detail': note})
+        score += pts; max_score += heading_max
 
-        # --- Industry / Sector Pages ---
-        sector_check = self._check_sector_pages(soup)
-        checks.append(sector_check)
-        score += sector_check['score']; max_score += sector_check['max']
+        # --- Mode-specific extras ---
+        if self.mode == 'recruitment':
+            sector_check = self._check_sector_pages(soup)
+            checks.append(sector_check)
+            score += sector_check['score']; max_score += sector_check['max']
+
+        elif self.mode == 'general':
+            # Sitemap check (10pts)
+            if self.has_sitemap:
+                pts, note = 10, 'sitemap.xml found ✓'
+            else:
+                pts, note = 0, 'No sitemap.xml — search engines rely on this for discovery'
+            checks.append({'name': 'Sitemap.xml', 'weight': 10, 'score': pts, 'max': 10,
+                            'status': self._pts_status(pts, 10), 'detail': note})
+            score += pts; max_score += 10
 
         pct = round(score / max_score * 100) if max_score else 0
+        has_job_schema = any(t in ['JobPosting'] for t in schema_types) if self.mode != 'general' else False
         return {
             'name': 'SEO & Discoverability',
             'icon': 'search',
