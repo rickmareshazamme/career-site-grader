@@ -1158,100 +1158,240 @@ class CareerSiteGrader:
         page_text = soup.get_text().lower()
         html_lower = self.html.lower()
 
-        # --- Social Proof ---
-        review_els = soup.find_all(class_=re.compile(r'review|testimonial|rating|quote', re.I))
-        has_testimonial = bool(re.search(
-            r'testimonial|what.{1,20}(say|think)|our clients say|candidates say|heard from|they said',
-            page_text, re.I
-        ))
-        has_stars = bool(soup.find_all(class_=re.compile(r'star|rating|score', re.I)))
-        sp_pts = 0; sp_notes = []
-        if review_els or has_testimonial:
-            sp_pts += 12; sp_notes.append('Testimonials / social proof detected ✓')
-        else:
-            sp_notes.append('No testimonials found — candidates rely on social proof')
-        if has_stars:
-            sp_pts += 8; sp_notes.append('Star ratings / scores detected ✓')
-        sp_pts = min(sp_pts, 20)
-        checks.append({'name': 'Social Proof & Reviews', 'weight': 20, 'score': sp_pts, 'max': 20,
-                        'status': self._pts_status(sp_pts, 20), 'detail': ' | '.join(sp_notes)})
-        score += sp_pts; max_score += 20
+        if self.mode == 'career_site':
+            # ----------------------------------------------------------------
+            # career_site brand checks
+            # ----------------------------------------------------------------
 
-        # --- Video Content ---
-        videos = soup.find_all('video')
-        iframes = soup.find_all('iframe')
-        yt_vimeo = [i for i in iframes if re.search(r'youtube|vimeo|loom|wistia', i.get('src', ''), re.I)]
-        has_video = bool(videos) or bool(yt_vimeo)
-        video_pts = 15 if has_video else 0
-        video_note = f'{len(videos) + len(yt_vimeo)} video element(s) — great for engagement ✓' if has_video \
-                     else 'No video — video content increases application intent by 34%'
-        checks.append({'name': 'Video Content', 'weight': 15, 'score': video_pts, 'max': 15,
-                        'status': self._pts_status(video_pts, 15), 'detail': video_note})
-        score += video_pts; max_score += 15
+            # --- Culture & Team Content (20pts) ---
+            culture_page_sig = bool(re.search(
+                r'culture|our.?team|meet.?the.?team|about.?us|who.?we.?are', page_text, re.I))
+            team_people_sig = bool(re.search(
+                r'our.?people|the.?team|leadership|meet.?us', page_text, re.I))
+            life_at_sig = bool(re.search(
+                r'life.?at|working.?at|working.?here|day.?in.?the.?life|what.?it.?s.?like',
+                page_text, re.I))
+            culture_pts = 0; culture_notes = []
+            if culture_page_sig:
+                culture_pts += 10; culture_notes.append('Culture/team content detected ✓')
+            else:
+                culture_notes.append('No culture or team content — candidates want to see who they\'ll work with')
+            if team_people_sig:
+                culture_pts += 5; culture_notes.append('People/team content ✓')
+            if life_at_sig:
+                culture_pts += 5; culture_notes.append('"Life at" / working experience content ✓')
+            culture_pts = min(culture_pts, 20)
+            checks.append({'name': 'Culture & Team Content', 'weight': 20, 'score': culture_pts, 'max': 20,
+                            'status': self._pts_status(culture_pts, 20), 'detail': ' | '.join(culture_notes)})
+            score += culture_pts; max_score += 20
 
-        # --- EVP Signals ---
-        salary_sig  = bool(re.search(r'salary|pay|compens|remunerat|\$|£|€|aud\b|wage|earn', page_text, re.I))
-        benefit_sig = bool(re.search(
-            r'benefit|perk|health|dental|vision|401k|pension|super(annuat)?|pto|vacation|holiday|'
-            r'\bremote\b|flexib|hybrid|parental|wellbeing|wellness', page_text, re.I))
-        culture_sig = bool(re.search(
-            r'culture|values?|mission|vision|diversity|inclus|belong|community|team spirit', page_text, re.I))
-        evp_pts = 0; evp_notes = []
-        if salary_sig:
-            evp_pts += 10; evp_notes.append('Salary/pay transparency ✓')
-        else:
-            evp_notes.append('No pay info — 67% of candidates want salary upfront')
-        if benefit_sig:
-            evp_pts += 10; evp_notes.append('Benefits/perks highlighted ✓')
-        else:
-            evp_notes.append('Benefits not prominently mentioned')
-        if culture_sig:
-            evp_pts += 5; evp_notes.append('Culture/values content ✓')
-        evp_pts = min(evp_pts, 25)
-        checks.append({'name': 'EVP & Pay Transparency', 'weight': 25, 'score': evp_pts, 'max': 25,
-                        'status': self._pts_status(evp_pts, 25), 'detail': ' | '.join(evp_notes)})
-        score += evp_pts; max_score += 25
+            # --- Employee Stories & Testimonials (15pts) ---
+            story_els = soup.find_all(class_=re.compile(r'review|testimonial|story|quote|employee', re.I))
+            has_employee_story = bool(re.search(
+                r'testimonial|employee.?stor|our.?people.?say|what.?they.?say|hear.?from|their.?words',
+                page_text, re.I))
+            has_video_testimonial = bool(re.search(
+                r'video.*testimonial|testimonial.*video|employee.*video', page_text, re.I))
+            emp_pts = 0; emp_notes = []
+            if story_els or has_employee_story:
+                emp_pts += 10; emp_notes.append('Employee stories / testimonials detected ✓')
+            else:
+                emp_notes.append('No employee stories — candidates trust peer voices over corporate messaging')
+            if has_video_testimonial:
+                emp_pts += 5; emp_notes.append('Video testimonials detected ✓')
+            emp_pts = min(emp_pts, 15)
+            checks.append({'name': 'Employee Stories & Testimonials', 'weight': 15, 'score': emp_pts, 'max': 15,
+                            'status': self._pts_status(emp_pts, 15), 'detail': ' | '.join(emp_notes)})
+            score += emp_pts; max_score += 15
 
-        # --- Visual Brand ---
-        og_img   = soup.find('meta', property='og:image')
-        favicon  = soup.find('link', rel=re.compile(r'icon', re.I))
-        brand_pts = 0; brand_notes = []
-        if og_img:
-            brand_pts += 10; brand_notes.append('og:image set ✓ — great social sharing brand')
-        else:
-            brand_notes.append('No og:image — unbranded appearance on LinkedIn/WhatsApp shares')
-        if favicon:
-            brand_pts += 5; brand_notes.append('Favicon present ✓')
-        else:
-            brand_notes.append('No favicon — affects trust and brand recall')
-        checks.append({'name': 'Visual Brand Assets', 'weight': 15, 'score': brand_pts, 'max': 15,
-                        'status': self._pts_status(brand_pts, 15), 'detail': ' | '.join(brand_notes)})
-        score += brand_pts; max_score += 15
+            # --- EVP & Pay Transparency (20pts) ---
+            salary_sig  = bool(re.search(r'salary|pay|compens|remunerat|\$|£|€|aud\b|wage|earn', page_text, re.I))
+            benefit_sig = bool(re.search(
+                r'benefit|perk|health|dental|vision|401k|pension|super(annuat)?|pto|vacation|holiday|'
+                r'\bremote\b|flexib|hybrid|parental|wellbeing|wellness', page_text, re.I))
+            growth_sig = bool(re.search(
+                r'career.?growth|career.?develop|career.?progress|learning.?&.?develop|'
+                r'professional.?develop|training|mentor|promotion|career.?path', page_text, re.I))
+            evp_pts = 0; evp_notes = []
+            if salary_sig:
+                evp_pts += 8; evp_notes.append('Salary/pay transparency ✓')
+            else:
+                evp_notes.append('No pay info — 67% of candidates want salary upfront')
+            if benefit_sig:
+                evp_pts += 7; evp_notes.append('Benefits/perks highlighted ✓')
+            else:
+                evp_notes.append('Benefits not prominently mentioned')
+            if growth_sig:
+                evp_pts += 5; evp_notes.append('Career growth / development content ✓')
+            else:
+                evp_notes.append('No career growth content — candidates want to see a future here')
+            evp_pts = min(evp_pts, 20)
+            checks.append({'name': 'EVP & Pay Transparency', 'weight': 20, 'score': evp_pts, 'max': 20,
+                            'status': self._pts_status(evp_pts, 20), 'detail': ' | '.join(evp_notes)})
+            score += evp_pts; max_score += 20
 
-        # --- Social Presence ---
-        platforms = ['linkedin', 'twitter', 'x.com', 'facebook', 'instagram', 'youtube',
-                     'glassdoor', 'indeed', 'tiktok']
-        found_platforms = set()
-        for link in soup.find_all('a', href=True):
-            href = (link.get('href') or '').lower()
-            for p in platforms:
-                if p in href:
-                    found_platforms.add(p)
-        soc_pts = min(len(found_platforms) * 3, 15)
-        soc_note = f'Social: {", ".join(found_platforms)} ✓' if found_platforms else 'No social media links found'
-        checks.append({'name': 'Social Presence', 'weight': 15, 'score': soc_pts, 'max': 15,
-                        'status': self._pts_status(soc_pts, 15), 'detail': soc_note})
-        score += soc_pts; max_score += 15
+            # --- DE&I Commitment (12pts) ---
+            dei_links = soup.find_all('a', href=re.compile(r'diversity|inclusion|dei|equity|belonging', re.I))
+            has_dei_page = bool(dei_links)
+            dei_content_sig = bool(re.search(
+                r'\bdei\b|diversity|equity|inclusion|equal opportunit|eeo|belonging|erg\b|'
+                r'accessible|disability|neurodiver', page_text, re.I))
+            dei_pts = 0; dei_notes = []
+            if has_dei_page:
+                dei_pts += 8; dei_notes.append(f'Dedicated DE&I page linked ✓ ({dei_links[0].get("href", "")[:60]})')
+            else:
+                dei_notes.append('No dedicated DE&I page — link to a diversity/inclusion page')
+            if dei_content_sig:
+                dei_pts += 4; dei_notes.append('DE&I keywords in content ✓')
+            else:
+                dei_notes.append('No DE&I content — increasingly important for talent attraction')
+            dei_pts = min(dei_pts, 12)
+            checks.append({'name': 'DE&I Commitment', 'weight': 12, 'score': dei_pts, 'max': 12,
+                            'status': self._pts_status(dei_pts, 12), 'detail': ' | '.join(dei_notes)})
+            score += dei_pts; max_score += 12
 
-        # --- DE&I ---
-        dei_sig = bool(re.search(
-            r'\bdei\b|diversity|equity|inclusion|equal opportunit|eeo|belonging|erg\b', page_text, re.I))
-        dei_pts = 10 if dei_sig else 0
-        dei_note = 'DE&I commitment visible ✓' if dei_sig else \
-                   'No DE&I content — increasingly important for talent attraction'
-        checks.append({'name': 'DE&I Commitment', 'weight': 10, 'score': dei_pts, 'max': 10,
-                        'status': self._pts_status(dei_pts, 10), 'detail': dei_note})
-        score += dei_pts; max_score += 10
+            # --- Video Content (10pts) ---
+            videos = soup.find_all('video')
+            iframes = soup.find_all('iframe')
+            yt_vimeo = [i for i in iframes if re.search(r'youtube|vimeo|loom|wistia', i.get('src', ''), re.I)]
+            has_video = bool(videos) or bool(yt_vimeo)
+            video_pts = 10 if has_video else 0
+            video_note = (f'{len(videos) + len(yt_vimeo)} video element(s) — great for engagement ✓'
+                          if has_video else 'No video — video content increases application intent by 34%')
+            checks.append({'name': 'Video Content', 'weight': 10, 'score': video_pts, 'max': 10,
+                            'status': self._pts_status(video_pts, 10), 'detail': video_note})
+            score += video_pts; max_score += 10
+
+            # --- Visual Brand Assets (8pts) ---
+            og_img  = soup.find('meta', property='og:image')
+            favicon = soup.find('link', rel=re.compile(r'icon', re.I))
+            brand_pts = 0; brand_notes = []
+            if og_img:
+                brand_pts += 5; brand_notes.append('og:image set ✓ — great social sharing brand')
+            else:
+                brand_notes.append('No og:image — unbranded appearance on LinkedIn/WhatsApp shares')
+            if favicon:
+                brand_pts += 3; brand_notes.append('Favicon present ✓')
+            else:
+                brand_notes.append('No favicon — affects trust and brand recall')
+            checks.append({'name': 'Visual Brand Assets', 'weight': 8, 'score': brand_pts, 'max': 8,
+                            'status': self._pts_status(brand_pts, 8), 'detail': ' | '.join(brand_notes)})
+            score += brand_pts; max_score += 8
+
+            # --- Social Presence (15pts) ---
+            platforms = ['linkedin', 'twitter', 'x.com', 'facebook', 'instagram', 'youtube',
+                         'glassdoor', 'indeed', 'tiktok']
+            found_platforms = set()
+            for link in soup.find_all('a', href=True):
+                href = (link.get('href') or '').lower()
+                for p in platforms:
+                    if p in href:
+                        found_platforms.add(p)
+            soc_pts = min(len(found_platforms) * 3, 15)
+            soc_note = f'Social: {", ".join(found_platforms)} ✓' if found_platforms else 'No social media links found'
+            checks.append({'name': 'Social Presence', 'weight': 15, 'score': soc_pts, 'max': 15,
+                            'status': self._pts_status(soc_pts, 15), 'detail': soc_note})
+            score += soc_pts; max_score += 15
+
+        else:
+            # ----------------------------------------------------------------
+            # recruitment mode — original logic unchanged
+            # ----------------------------------------------------------------
+
+            # --- Social Proof ---
+            review_els = soup.find_all(class_=re.compile(r'review|testimonial|rating|quote', re.I))
+            has_testimonial = bool(re.search(
+                r'testimonial|what.{1,20}(say|think)|our clients say|candidates say|heard from|they said',
+                page_text, re.I
+            ))
+            has_stars = bool(soup.find_all(class_=re.compile(r'star|rating|score', re.I)))
+            sp_pts = 0; sp_notes = []
+            if review_els or has_testimonial:
+                sp_pts += 12; sp_notes.append('Testimonials / social proof detected ✓')
+            else:
+                sp_notes.append('No testimonials found — candidates rely on social proof')
+            if has_stars:
+                sp_pts += 8; sp_notes.append('Star ratings / scores detected ✓')
+            sp_pts = min(sp_pts, 20)
+            checks.append({'name': 'Social Proof & Reviews', 'weight': 20, 'score': sp_pts, 'max': 20,
+                            'status': self._pts_status(sp_pts, 20), 'detail': ' | '.join(sp_notes)})
+            score += sp_pts; max_score += 20
+
+            # --- Video Content ---
+            videos = soup.find_all('video')
+            iframes = soup.find_all('iframe')
+            yt_vimeo = [i for i in iframes if re.search(r'youtube|vimeo|loom|wistia', i.get('src', ''), re.I)]
+            has_video = bool(videos) or bool(yt_vimeo)
+            video_pts = 15 if has_video else 0
+            video_note = (f'{len(videos) + len(yt_vimeo)} video element(s) — great for engagement ✓'
+                          if has_video else 'No video — video content increases application intent by 34%')
+            checks.append({'name': 'Video Content', 'weight': 15, 'score': video_pts, 'max': 15,
+                            'status': self._pts_status(video_pts, 15), 'detail': video_note})
+            score += video_pts; max_score += 15
+
+            # --- EVP Signals ---
+            salary_sig  = bool(re.search(r'salary|pay|compens|remunerat|\$|£|€|aud\b|wage|earn', page_text, re.I))
+            benefit_sig = bool(re.search(
+                r'benefit|perk|health|dental|vision|401k|pension|super(annuat)?|pto|vacation|holiday|'
+                r'\bremote\b|flexib|hybrid|parental|wellbeing|wellness', page_text, re.I))
+            culture_sig = bool(re.search(
+                r'culture|values?|mission|vision|diversity|inclus|belong|community|team spirit', page_text, re.I))
+            evp_pts = 0; evp_notes = []
+            if salary_sig:
+                evp_pts += 10; evp_notes.append('Salary/pay transparency ✓')
+            else:
+                evp_notes.append('No pay info — 67% of candidates want salary upfront')
+            if benefit_sig:
+                evp_pts += 10; evp_notes.append('Benefits/perks highlighted ✓')
+            else:
+                evp_notes.append('Benefits not prominently mentioned')
+            if culture_sig:
+                evp_pts += 5; evp_notes.append('Culture/values content ✓')
+            evp_pts = min(evp_pts, 25)
+            checks.append({'name': 'EVP & Pay Transparency', 'weight': 25, 'score': evp_pts, 'max': 25,
+                            'status': self._pts_status(evp_pts, 25), 'detail': ' | '.join(evp_notes)})
+            score += evp_pts; max_score += 25
+
+            # --- Visual Brand ---
+            og_img   = soup.find('meta', property='og:image')
+            favicon  = soup.find('link', rel=re.compile(r'icon', re.I))
+            brand_pts = 0; brand_notes = []
+            if og_img:
+                brand_pts += 10; brand_notes.append('og:image set ✓ — great social sharing brand')
+            else:
+                brand_notes.append('No og:image — unbranded appearance on LinkedIn/WhatsApp shares')
+            if favicon:
+                brand_pts += 5; brand_notes.append('Favicon present ✓')
+            else:
+                brand_notes.append('No favicon — affects trust and brand recall')
+            checks.append({'name': 'Visual Brand Assets', 'weight': 15, 'score': brand_pts, 'max': 15,
+                            'status': self._pts_status(brand_pts, 15), 'detail': ' | '.join(brand_notes)})
+            score += brand_pts; max_score += 15
+
+            # --- Social Presence ---
+            platforms = ['linkedin', 'twitter', 'x.com', 'facebook', 'instagram', 'youtube',
+                         'glassdoor', 'indeed', 'tiktok']
+            found_platforms = set()
+            for link in soup.find_all('a', href=True):
+                href = (link.get('href') or '').lower()
+                for p in platforms:
+                    if p in href:
+                        found_platforms.add(p)
+            soc_pts = min(len(found_platforms) * 3, 15)
+            soc_note = f'Social: {", ".join(found_platforms)} ✓' if found_platforms else 'No social media links found'
+            checks.append({'name': 'Social Presence', 'weight': 15, 'score': soc_pts, 'max': 15,
+                            'status': self._pts_status(soc_pts, 15), 'detail': soc_note})
+            score += soc_pts; max_score += 15
+
+            # --- DE&I ---
+            dei_sig = bool(re.search(
+                r'\bdei\b|diversity|equity|inclusion|equal opportunit|eeo|belonging|erg\b', page_text, re.I))
+            dei_pts = 10 if dei_sig else 0
+            dei_note = 'DE&I commitment visible ✓' if dei_sig else \
+                       'No DE&I content — increasingly important for talent attraction'
+            checks.append({'name': 'DE&I Commitment', 'weight': 10, 'score': dei_pts, 'max': 10,
+                            'status': self._pts_status(dei_pts, 10), 'detail': dei_note})
+            score += dei_pts; max_score += 10
 
         pct = round(score / max_score * 100) if max_score else 0
         return {
