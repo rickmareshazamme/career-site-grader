@@ -1776,28 +1776,25 @@ class CareerSiteGrader:
         max_score = 0
 
         # --- HTTPS ---
+        https_max = 15 if self.mode == 'general' else 20
         is_https = self.url.startswith('https://')
-        pts = 20 if is_https else 0
+        pts = https_max if is_https else 0
         note = 'HTTPS secure ✓' if is_https else 'Not HTTPS — Google ranks HTTPS pages higher'
-        checks.append({'name': 'HTTPS / SSL', 'weight': 20, 'score': pts, 'max': 20,
-                        'status': self._pts_status(pts, 20), 'detail': note})
-        score += pts; max_score += 20
+        checks.append({'name': 'HTTPS / SSL', 'weight': https_max, 'score': pts, 'max': https_max,
+                        'status': self._pts_status(pts, https_max), 'detail': note})
+        score += pts; max_score += https_max
 
         # --- Server Response Time ---
+        ttfb_max = 20 if self.mode == 'general' else 25
         rt = self.response_time
-        if rt < 0.5:
-            pts, note = 25, f'Excellent TTFB: {rt:.2f}s — top 10% performance'
-        elif rt < 1.0:
-            pts, note = 20, f'Good TTFB: {rt:.2f}s'
-        elif rt < 2.0:
-            pts, note = 14, f'Average: {rt:.2f}s TTFB — target <1s for Core Web Vitals'
-        elif rt < 4.0:
-            pts, note = 7, f'Slow: {rt:.2f}s — investigate server/hosting performance'
-        else:
-            pts, note = 2, f'Critical: {rt:.2f}s — will fail Core Web Vitals'
-        checks.append({'name': 'Server Response (TTFB)', 'weight': 25, 'score': pts, 'max': 25,
-                        'status': self._pts_status(pts, 25), 'detail': note})
-        score += pts; max_score += 25
+        if rt < 0.5:   pts, note = ttfb_max, f'Excellent TTFB: {rt:.2f}s — top 10%'
+        elif rt < 1.0:  pts, note = round(ttfb_max * 0.8), f'Good TTFB: {rt:.2f}s'
+        elif rt < 2.0:  pts, note = round(ttfb_max * 0.56), f'Average: {rt:.2f}s — target <1s'
+        elif rt < 4.0:  pts, note = round(ttfb_max * 0.28), f'Slow: {rt:.2f}s'
+        else:           pts, note = round(ttfb_max * 0.08), f'Critical: {rt:.2f}s'
+        checks.append({'name': 'Server Response (TTFB)', 'weight': ttfb_max, 'score': pts, 'max': ttfb_max,
+                        'status': self._pts_status(pts, ttfb_max), 'detail': note})
+        score += pts; max_score += ttfb_max
 
         # --- Compression ---
         encoding = self.headers.get('content-encoding', '')
@@ -1806,59 +1803,88 @@ class CareerSiteGrader:
         elif 'gzip' in encoding:
             pts, note = 12, 'Gzip compression enabled ✓'
         else:
-            pts, note = 0, 'No compression detected — enable gzip/Brotli to reduce transfer size'
+            pts, note = 0, 'No compression — enable gzip/Brotli to reduce transfer size'
         checks.append({'name': 'Content Compression', 'weight': 15, 'score': pts, 'max': 15,
                         'status': self._pts_status(pts, 15), 'detail': note})
         score += pts; max_score += 15
 
         # --- Caching ---
+        cache_max = 12 if self.mode == 'general' else 15
         cache_ctrl = self.headers.get('cache-control', '')
-        etag       = self.headers.get('etag', '')
-        last_mod   = self.headers.get('last-modified', '')
+        etag = self.headers.get('etag', '')
+        last_mod = self.headers.get('last-modified', '')
         cache_pts = 0; cache_notes = []
         if cache_ctrl:
-            cache_pts += 8; cache_notes.append(f'Cache-Control: {cache_ctrl[:50]}')
+            cache_pts += round(cache_max * 0.53); cache_notes.append(f'Cache-Control: {cache_ctrl[:50]}')
         else:
             cache_notes.append('No Cache-Control header')
         if etag or last_mod:
-            cache_pts += 7; cache_notes.append('Conditional caching supported ✓')
-        checks.append({'name': 'Caching Strategy', 'weight': 15, 'score': cache_pts, 'max': 15,
-                        'status': self._pts_status(cache_pts, 15), 'detail': ' | '.join(cache_notes)})
-        score += cache_pts; max_score += 15
+            cache_pts += round(cache_max * 0.47); cache_notes.append('Conditional caching ✓')
+        cache_pts = min(cache_pts, cache_max)
+        checks.append({'name': 'Caching Strategy', 'weight': cache_max, 'score': cache_pts, 'max': cache_max,
+                        'status': self._pts_status(cache_pts, cache_max), 'detail': ' | '.join(cache_notes)})
+        score += cache_pts; max_score += cache_max
 
         # --- Resource Hints ---
-        preload    = soup.find_all('link', rel='preload')
+        hint_max = 8 if self.mode == 'general' else 10
+        preload = soup.find_all('link', rel='preload')
         preconnect = soup.find_all('link', rel='preconnect')
-        prefetch   = soup.find_all('link', rel='prefetch')
         hint_pts = 0; hint_notes = []
-        if preconnect:
-            hint_pts += 5; hint_notes.append(f'{len(preconnect)} preconnect hint(s) ✓')
-        if preload:
-            hint_pts += 5; hint_notes.append(f'{len(preload)} preload resource(s) ✓')
-        if not preconnect and not preload:
-            hint_notes.append('No resource hints — add preconnect for 3rd-party origins')
-        hint_pts = min(hint_pts, 10)
-        checks.append({'name': 'Resource Hints', 'weight': 10, 'score': hint_pts, 'max': 10,
-                        'status': self._pts_status(hint_pts, 10),
+        if preconnect: hint_pts += round(hint_max * 0.5); hint_notes.append(f'{len(preconnect)} preconnect ✓')
+        if preload: hint_pts += round(hint_max * 0.5); hint_notes.append(f'{len(preload)} preload ✓')
+        if not preconnect and not preload: hint_notes.append('No resource hints')
+        hint_pts = min(hint_pts, hint_max)
+        checks.append({'name': 'Resource Hints', 'weight': hint_max, 'score': hint_pts, 'max': hint_max,
+                        'status': self._pts_status(hint_pts, hint_max),
                         'detail': ' | '.join(hint_notes) if hint_notes else 'None detected'})
-        score += hint_pts; max_score += 10
+        score += hint_pts; max_score += hint_max
 
         # --- Render-Blocking JS ---
-        blocking_js = [
-            s for s in soup.find_all('script', src=True)
-            if not s.get('defer') and not s.get('async') and s.get('type') != 'module'
-        ]
-        if len(blocking_js) == 0:
-            pts, note = 15, 'No render-blocking scripts ✓'
-        elif len(blocking_js) <= 2:
-            pts, note = 10, f'{len(blocking_js)} render-blocking script(s) — add defer/async'
-        elif len(blocking_js) <= 5:
-            pts, note = 5, f'{len(blocking_js)} render-blocking scripts — significant performance impact'
-        else:
-            pts, note = 0, f'{len(blocking_js)} render-blocking scripts — critical performance issue'
-        checks.append({'name': 'Render-Blocking Scripts', 'weight': 15, 'score': pts, 'max': 15,
-                        'status': self._pts_status(pts, 15), 'detail': note})
-        score += pts; max_score += 15
+        blocking_js = [s for s in soup.find_all('script', src=True)
+                       if not s.get('defer') and not s.get('async') and s.get('type') != 'module']
+        block_max = 10 if self.mode == 'general' else 15
+        if len(blocking_js) == 0: pts, note = block_max, 'No render-blocking scripts ✓'
+        elif len(blocking_js) <= 2: pts, note = round(block_max * 0.67), f'{len(blocking_js)} blocking script(s)'
+        elif len(blocking_js) <= 5: pts, note = round(block_max * 0.33), f'{len(blocking_js)} blocking scripts'
+        else: pts, note = 0, f'{len(blocking_js)} blocking scripts — critical'
+        checks.append({'name': 'Render-Blocking Scripts', 'weight': block_max, 'score': pts, 'max': block_max,
+                        'status': self._pts_status(pts, block_max), 'detail': note})
+        score += pts; max_score += block_max
+
+        # --- General mode extras ---
+        if self.mode == 'general':
+            # HTTP/2+ (10pts)
+            server = self.headers.get('server', '').lower()
+            alt_svc = self.headers.get('alt-svc', '')
+            h2_detected = bool(alt_svc) or 'h2' in server or 'nginx' in server or 'cloudflare' in server
+            h2_pts = 10 if h2_detected else 0
+            h2_note = 'Modern server/HTTP2+ indicators detected ✓' if h2_detected else 'No HTTP/2 indicators found'
+            checks.append({'name': 'HTTP/2+', 'weight': 10, 'score': h2_pts, 'max': 10,
+                            'status': self._pts_status(h2_pts, 10), 'detail': h2_note,
+                            'value': alt_svc[:60] if alt_svc else None})
+            score += h2_pts; max_score += 10
+
+            # Analytics Detection (10pts)
+            html_lower = self.html.lower()
+            analytics = []
+            for name, pattern in [
+                ('Google Analytics', r'gtag|google-analytics|googletagmanager|ga\.js|analytics\.js'),
+                ('GTM', r'googletagmanager\.com/gtm'),
+                ('Plausible', r'plausible\.io'),
+                ('Fathom', r'usefathom\.com|cdn\.usefathom'),
+                ('Matomo', r'matomo|piwik'),
+                ('Hotjar', r'hotjar\.com|static\.hotjar'),
+                ('Mixpanel', r'mixpanel\.com|cdn\.mxpnl'),
+                ('Segment', r'segment\.com|cdn\.segment'),
+                ('Heap', r'heap\.io|heapanalytics'),
+            ]:
+                if re.search(pattern, html_lower):
+                    analytics.append(name)
+            an_pts = 10 if analytics else 0
+            an_note = f'Analytics: {", ".join(analytics)} ✓' if analytics else 'No analytics detected — you have no visibility into visitor behaviour'
+            checks.append({'name': 'Analytics & Tracking', 'weight': 10, 'score': an_pts, 'max': 10,
+                            'status': self._pts_status(an_pts, 10), 'detail': an_note})
+            score += an_pts; max_score += 10
 
         pct = round(score / max_score * 100) if max_score else 0
         return {
@@ -1893,37 +1919,51 @@ class CareerSiteGrader:
         html_lower = self.html.lower()
 
         # --- CTA Quality ---
-        cta_re = re.compile(
-            r'\b(apply now|apply today|search jobs|find jobs|browse jobs|get started|'
-            r'upload (your |a )?cv|submit (your |a )?resume|register|sign up|join us|'
-            r'view jobs|explore jobs|start (your )?job search|see (all )?jobs)\b', re.I
-        )
+        if self.mode == 'general':
+            cta_re = re.compile(
+                r'\b(get started|contact us|learn more|sign up|try free|request demo|'
+                r'buy now|subscribe|download|book (a )?call|schedule|start free|'
+                r'create account|get in touch|shop now|add to cart|free trial)\b', re.I)
+        elif self.mode == 'career_site':
+            cta_re = re.compile(
+                r'\b(apply now|apply today|search jobs|find jobs|browse jobs|get started|'
+                r'upload (your |a )?cv|submit (your |a )?resume|register|sign up|join us|'
+                r'view jobs|explore jobs|explore roles|see open positions|join our team|'
+                r'work with us|view opportunities|start (your )?job search|see (all )?jobs)\b', re.I)
+        else:  # recruitment
+            cta_re = re.compile(
+                r'\b(apply now|apply today|search jobs|find jobs|browse jobs|get started|'
+                r'upload (your |a )?cv|submit (your |a )?resume|register|sign up|join us|'
+                r'view jobs|explore jobs|start (your )?job search|see (all )?jobs)\b', re.I)
+
         cta_els = soup.find_all(lambda t: t.name in ['a', 'button'] and cta_re.search(t.get_text()))
-        if len(cta_els) >= 4:
-            pts, note = 25, f'{len(cta_els)} strong CTAs detected ✓'
-        elif len(cta_els) >= 2:
-            pts, note = 18, f'{len(cta_els)} CTAs found — add more throughout'
-        elif len(cta_els) == 1:
-            pts, note = 10, '1 CTA found — not enough to guide candidates'
-        else:
-            pts, note = 0, 'No clear CTAs — candidates have no next step'
+        if len(cta_els) >= 4: pts, note = 25, f'{len(cta_els)} strong CTAs ✓'
+        elif len(cta_els) >= 2: pts, note = 18, f'{len(cta_els)} CTAs — add more throughout'
+        elif len(cta_els) == 1: pts, note = 10, '1 CTA — not enough to guide visitors'
+        else: pts, note = 0, 'No clear CTAs — visitors have no next step'
         checks.append({'name': 'Call-to-Action Strength', 'weight': 25, 'score': pts, 'max': 25,
                         'status': self._pts_status(pts, 25), 'detail': note})
         score += pts; max_score += 25
 
-        # --- Job Alerts / Email Capture ---
+        # --- Lead Capture ---
         email_inputs = soup.find_all('input', type=re.compile(r'email', re.I))
-        alert_sig    = bool(re.search(
-            r'job alert|email alert|notify me|get notified|job match|saved search|subscribe', page_text, re.I))
-        alert_pts = 0; alert_notes = []
-        if email_inputs:
-            alert_pts += 12; alert_notes.append(f'{len(email_inputs)} email capture(s) ✓')
-        if alert_sig:
-            alert_pts += 8; alert_notes.append('Job alert / subscription detected ✓')
+        if self.mode == 'general':
+            alert_sig = bool(re.search(r'subscribe|newsletter|notify|get notified|mailing list', page_text))
+            lead_label = 'Lead Capture / Newsletter'
         else:
-            alert_notes.append('No job alert feature — critical for re-engaging passive candidates')
+            alert_sig = bool(re.search(
+                r'job alert|email alert|notify me|get notified|job match|saved search|subscribe', page_text))
+            lead_label = 'Job Alerts & Lead Capture'
+        alert_pts = 0; alert_notes = []
+        if email_inputs: alert_pts += 12; alert_notes.append(f'{len(email_inputs)} email capture(s) ✓')
+        if alert_sig: alert_pts += 8; alert_notes.append('Subscription/alert detected ✓')
+        else:
+            if self.mode == 'general':
+                alert_notes.append('No newsletter/subscribe — missing lead capture opportunity')
+            else:
+                alert_notes.append('No job alert feature — critical for re-engaging passive candidates')
         alert_pts = min(alert_pts, 20)
-        checks.append({'name': 'Job Alerts & Lead Capture', 'weight': 20, 'score': alert_pts, 'max': 20,
+        checks.append({'name': lead_label, 'weight': 20, 'score': alert_pts, 'max': 20,
                         'status': self._pts_status(alert_pts, 20), 'detail': ' | '.join(alert_notes)})
         score += alert_pts; max_score += 20
 
@@ -1932,39 +1972,65 @@ class CareerSiteGrader:
             r'intercom|drift|crisp|tawk|zendesk|livechat|tidio|freshchat|hubspot|'
             r'chatbot|live.?chat|chat.?widget|widget.?chat|genesys|qualified', html_lower)
         chat_pts = 20 if chat_sig else 0
-        chat_note = 'Live chat / chatbot detected ✓' if chat_sig else \
-                    'No chat detected — chatbots reduce application abandonment by up to 40%'
+        chat_note = 'Live chat / chatbot detected ✓' if chat_sig else 'No chat detected — missed engagement opportunity'
         checks.append({'name': 'Live Chat & Chatbot', 'weight': 20, 'score': chat_pts, 'max': 20,
                         'status': self._pts_status(chat_pts, 20), 'detail': chat_note})
         score += chat_pts; max_score += 20
 
-        # --- Job Search & Filter ---
-        search_box = (soup.find('input', attrs={'type': 'search'}) or
-                      soup.find('input', placeholder=re.compile(r'search|job|role|keyword', re.I)) or
-                      soup.find('input', id=re.compile(r'search|job', re.I)))
-        search_form = soup.find('form', id=re.compile(r'search', re.I))
-        filter_els  = soup.find_all(class_=re.compile(r'filter|facet|refine', re.I))
-        srch_pts = 0; srch_notes = []
-        if search_box or search_form:
-            srch_pts += 15; srch_notes.append('Job search detected ✓')
+        # --- Search (general) or Job Search (recruitment/career_site) ---
+        if self.mode == 'general':
+            search_box = soup.find('input', attrs={'type': 'search'}) or \
+                         soup.find('input', placeholder=re.compile(r'search', re.I))
+            srch_pts = 15 if search_box else 0
+            srch_note = 'Site search detected ✓' if search_box else 'No search functionality'
+            checks.append({'name': 'Search Functionality', 'weight': 15, 'score': srch_pts, 'max': 15,
+                            'status': self._pts_status(srch_pts, 15), 'detail': srch_note})
+            score += srch_pts; max_score += 15
         else:
-            srch_notes.append('No job search on page — candidates expect instant search')
-        if filter_els:
-            srch_pts += 5; srch_notes.append(f'{len(filter_els)} filter element(s) ✓')
-        srch_pts = min(srch_pts, 20)
-        checks.append({'name': 'Job Search & Filters', 'weight': 20, 'score': srch_pts, 'max': 20,
-                        'status': self._pts_status(srch_pts, 20), 'detail': ' | '.join(srch_notes)})
-        score += srch_pts; max_score += 20
+            search_box = (soup.find('input', attrs={'type': 'search'}) or
+                          soup.find('input', placeholder=re.compile(r'search|job|role|keyword', re.I)) or
+                          soup.find('input', id=re.compile(r'search|job', re.I)))
+            search_form = soup.find('form', id=re.compile(r'search', re.I))
+            filter_els = soup.find_all(class_=re.compile(r'filter|facet|refine', re.I))
+            srch_pts = 0; srch_notes = []
+            if search_box or search_form:
+                srch_pts += 15; srch_notes.append('Job search detected ✓')
+            else:
+                srch_notes.append('No job search — candidates expect instant search')
+            if filter_els:
+                srch_pts += 5; srch_notes.append(f'{len(filter_els)} filter element(s) ✓')
+            srch_pts = min(srch_pts, 20)
+            checks.append({'name': 'Job Search & Filters', 'weight': 20, 'score': srch_pts, 'max': 20,
+                            'status': self._pts_status(srch_pts, 20), 'detail': ' | '.join(srch_notes)})
+            score += srch_pts; max_score += 20
 
         # --- Social Sharing ---
-        share_els = soup.find_all(class_=re.compile(r'\bshare\b|social-share', re.I))
-        share_sig = bool(re.search(r'share.*job|refer.*friend|share.*role', html_lower))
-        share_pts = 15 if (share_els or share_sig) else 0
-        share_note = 'Social sharing detected ✓' if (share_els or share_sig) else \
-                     'No social sharing — candidates cannot easily refer friends to roles'
-        checks.append({'name': 'Social Sharing & Referrals', 'weight': 15, 'score': share_pts, 'max': 15,
-                        'status': self._pts_status(share_pts, 15), 'detail': share_note})
-        score += share_pts; max_score += 15
+        if self.mode == 'general':
+            social_links = soup.find_all('a', href=re.compile(r'linkedin|twitter|x\.com|facebook|instagram', re.I))
+            share_els = soup.find_all(class_=re.compile(r'\bshare\b|social', re.I))
+            soc_pts = 10 if (social_links or share_els) else 0
+            soc_note = 'Social links/sharing detected ✓' if soc_pts else 'No social links or sharing'
+            checks.append({'name': 'Social Links & Sharing', 'weight': 10, 'score': soc_pts, 'max': 10,
+                            'status': self._pts_status(soc_pts, 10), 'detail': soc_note})
+            score += soc_pts; max_score += 10
+
+            # Analytics (10pts for general conversion)
+            analytics_detected = bool(re.search(
+                r'gtag|google-analytics|googletagmanager|plausible|fathom|matomo|hotjar|mixpanel', html_lower))
+            an_pts = 10 if analytics_detected else 0
+            an_note = 'Analytics/tracking present ✓' if analytics_detected else 'No analytics — no conversion tracking'
+            checks.append({'name': 'Analytics & Tracking', 'weight': 10, 'score': an_pts, 'max': 10,
+                            'status': self._pts_status(an_pts, 10), 'detail': an_note})
+            score += an_pts; max_score += 10
+        else:
+            share_els = soup.find_all(class_=re.compile(r'\bshare\b|social-share', re.I))
+            share_sig = bool(re.search(r'share.*job|refer.*friend|share.*role', html_lower))
+            share_pts = 15 if (share_els or share_sig) else 0
+            share_note = 'Social sharing detected ✓' if (share_els or share_sig) else \
+                         'No social sharing — candidates cannot easily refer friends'
+            checks.append({'name': 'Social Sharing & Referrals', 'weight': 15, 'score': share_pts, 'max': 15,
+                            'status': self._pts_status(share_pts, 15), 'detail': share_note})
+            score += share_pts; max_score += 15
 
         pct = round(score / max_score * 100) if max_score else 0
         return {
