@@ -9,13 +9,13 @@ from grader import CareerSiteGrader
 app = Flask(__name__, static_folder='public')
 
 
-def run_grader_in_thread(url: str, q: queue.Queue):
+def run_grader_in_thread(url: str, mode: str, q: queue.Queue):
     """Run the async grader in a background thread and push events to queue."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
     async def collect():
-        grader = CareerSiteGrader(url)
+        grader = CareerSiteGrader(url, mode=mode)
         async for event in grader.grade():
             q.put(event)
         q.put(None)  # sentinel
@@ -40,9 +40,14 @@ def grade():
     if not url:
         return jsonify({'error': 'URL parameter required'}), 400
 
+    VALID_MODES = ('recruitment', 'career_site', 'general')
+    mode = (request.args.get('mode') or '').strip()
+    if mode not in VALID_MODES:
+        return jsonify({'error': f'mode parameter required. Must be one of: {", ".join(VALID_MODES)}'}), 400
+
     def generate():
         q: queue.Queue = queue.Queue()
-        t = threading.Thread(target=run_grader_in_thread, args=(url, q), daemon=True)
+        t = threading.Thread(target=run_grader_in_thread, args=(url, mode, q), daemon=True)
         t.start()
 
         while True:
