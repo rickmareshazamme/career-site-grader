@@ -808,128 +808,276 @@ class CareerSiteGrader:
         score = 0
         max_score = 0
 
-        # --- Mobile Readiness ---
-        viewport = soup.find('meta', attrs={'name': re.compile(r'^viewport$', re.I)})
-        if viewport:
-            content = (viewport.get('content') or '').lower()
-            if 'width=device-width' in content:
-                pts, note = 15, 'Responsive viewport configured correctly ✓'
+        if self.mode == 'career_site':
+            # --- Mobile Readiness (12pts) ---
+            mobile_max = 12
+            viewport = soup.find('meta', attrs={'name': re.compile(r'^viewport$', re.I)})
+            if viewport:
+                content = (viewport.get('content') or '').lower()
+                if 'width=device-width' in content:
+                    pts, note = mobile_max, 'Responsive viewport configured correctly ✓'
+                else:
+                    pts, note = 6, f'Viewport meta present but not optimal: {content[:60]}'
             else:
-                pts, note = 7, f'Viewport meta present but not optimal: {content[:60]}'
-        else:
-            pts, note = 0, 'No viewport meta — site will appear broken on mobile (60%+ of job searches)'
-        checks.append({'name': 'Mobile Readiness', 'weight': 15, 'score': pts, 'max': 15,
-                        'status': self._pts_status(pts, 15), 'detail': note})
-        score += pts; max_score += 15
+                pts, note = 0, 'No viewport meta — site will appear broken on mobile (60%+ of job searches)'
+            checks.append({'name': 'Mobile Readiness', 'weight': mobile_max, 'score': pts, 'max': mobile_max,
+                            'status': self._pts_status(pts, mobile_max), 'detail': note})
+            score += pts; max_score += mobile_max
 
-        # --- Accessibility ---
-        html_tag = soup.find('html')
-        lang = (html_tag.get('lang') or '') if html_tag else ''
-        images = soup.find_all('img')
-        imgs_with_alt = [i for i in images if i.get('alt') is not None]
-        lang_pts = 5 if lang else 0
-        lang_note = f'lang="{lang}" ✓' if lang else 'Missing lang attribute on <html>'
-        if images:
-            ratio = len(imgs_with_alt) / len(images)
-            if ratio >= 0.9:
-                alt_pts, alt_note = 10, f'{len(imgs_with_alt)}/{len(images)} images have alt text ✓'
-            elif ratio >= 0.6:
-                alt_pts, alt_note = 6, f'{len(imgs_with_alt)}/{len(images)} images have alt text'
+            # --- Accessibility (15pts) ---
+            html_tag = soup.find('html')
+            lang = (html_tag.get('lang') or '') if html_tag else ''
+            images = soup.find_all('img')
+            imgs_with_alt = [i for i in images if i.get('alt') is not None]
+            lang_pts = 5 if lang else 0
+            lang_note = f'lang="{lang}" ✓' if lang else 'Missing lang attribute on <html>'
+            if images:
+                ratio = len(imgs_with_alt) / len(images)
+                if ratio >= 0.9:
+                    alt_pts, alt_note = 10, f'{len(imgs_with_alt)}/{len(images)} images have alt text ✓'
+                elif ratio >= 0.6:
+                    alt_pts, alt_note = 6, f'{len(imgs_with_alt)}/{len(images)} images have alt text'
+                else:
+                    alt_pts, alt_note = 2, f'Only {len(imgs_with_alt)}/{len(images)} images have alt text — accessibility fail'
             else:
-                alt_pts, alt_note = 2, f'Only {len(imgs_with_alt)}/{len(images)} images have alt text — accessibility fail'
-        else:
-            alt_pts, alt_note = 5, 'No images found to evaluate'
-        a11y_pts = lang_pts + alt_pts
-        checks.append({'name': 'Accessibility (WCAG)', 'weight': 15, 'score': a11y_pts, 'max': 15,
-                        'status': self._pts_status(a11y_pts, 15), 'detail': f'{lang_note} | {alt_note}'})
-        score += a11y_pts; max_score += 15
+                alt_pts, alt_note = 5, 'No images found to evaluate'
+            a11y_pts = lang_pts + alt_pts
+            checks.append({'name': 'Accessibility (WCAG)', 'weight': 15, 'score': a11y_pts, 'max': 15,
+                            'status': self._pts_status(a11y_pts, 15), 'detail': f'{lang_note} | {alt_note}'})
+            score += a11y_pts; max_score += 15
 
-        # --- Apply & Job Search ---
-        apply_btns = soup.find_all(
-            lambda t: t.name in ['a', 'button'] and
-            re.search(r'\bapply\b', t.get_text(), re.I)
-        )
-        page_text_lower = soup.get_text().lower()
-        search_box = (soup.find('input', attrs={'type': 'search'}) or
-                      soup.find('input', placeholder=re.compile(r'search|job|role|keyword', re.I)) or
-                      soup.find('input', id=re.compile(r'search|job', re.I)))
-        search_form = (soup.find('form', id=re.compile(r'search', re.I)) or
-                       soup.find('form', class_=re.compile(r'search|job-search', re.I)))
-        has_job_search = bool(search_box or search_form or 'job search' in page_text_lower)
+            # --- Apply Flow (20pts max) ---
+            apply_btns = soup.find_all(
+                lambda t: t.name in ['a', 'button'] and
+                re.search(r'\bapply\b', t.get_text(), re.I)
+            )
+            page_text_lower = soup.get_text().lower()
+            search_box = (soup.find('input', attrs={'type': 'search'}) or
+                          soup.find('input', placeholder=re.compile(r'search|job|role|keyword', re.I)) or
+                          soup.find('input', id=re.compile(r'search|job', re.I)))
+            search_form = (soup.find('form', id=re.compile(r'search', re.I)) or
+                           soup.find('form', class_=re.compile(r'search|job-search', re.I)))
+            has_job_search = bool(search_box or search_form or 'job search' in page_text_lower)
 
-        apply_pts = 0; apply_notes = []
-        if len(apply_btns) >= 2:
-            apply_pts += 15; apply_notes.append(f'{len(apply_btns)} Apply buttons ✓')
-        elif apply_btns:
-            apply_pts += 10; apply_notes.append(f'{len(apply_btns)} Apply button found')
-        else:
-            apply_notes.append('No Apply button detected — how do candidates apply?')
-        if has_job_search:
-            apply_pts += 10; apply_notes.append('Job search detected ✓')
-        else:
-            apply_notes.append('No job search — candidates cannot find relevant roles')
-        checks.append({'name': 'Apply Flow & Job Search', 'weight': 25, 'score': apply_pts, 'max': 25,
-                        'status': self._pts_status(apply_pts, 25), 'detail': ' | '.join(apply_notes)})
-        score += apply_pts; max_score += 25
+            # Count visible form fields (inputs/selects/textareas) in all forms
+            all_field_inputs = soup.find_all(['input', 'select', 'textarea'])
+            field_count = len([
+                f for f in all_field_inputs
+                if f.get('type', 'text') not in ('hidden', 'submit', 'button', 'reset', 'image')
+            ])
 
-        # --- Navigation ---
-        nav_tags = soup.find_all('nav')
-        breadcrumb_html = bool(soup.find(class_=re.compile(r'breadcrumb', re.I)))
-        schema_types = self._get_schema_types()
-        has_breadcrumb_schema = 'BreadcrumbList' in schema_types
-        nav_pts = 0; nav_notes = []
-        if nav_tags:
-            nav_pts += 10; nav_notes.append(f'{len(nav_tags)} <nav> element(s) ✓')
-        else:
-            nav_notes.append('No semantic <nav> — navigation not machine-readable')
-        if has_breadcrumb_schema or breadcrumb_html:
-            nav_pts += 5; nav_notes.append('Breadcrumbs present ✓')
-        checks.append({'name': 'Navigation & Structure', 'weight': 15, 'score': nav_pts, 'max': 15,
-                        'status': self._pts_status(nav_pts, 15), 'detail': ' | '.join(nav_notes)})
-        score += nav_pts; max_score += 15
-
-        # --- HTTPS Trust Signal ---
-        is_https = self.url.startswith('https://')
-        pts = 10 if is_https else 0
-        note = 'HTTPS ✓ — candidates trust this site' if is_https else 'Not HTTPS — browsers show "Not Secure" warning to candidates'
-        checks.append({'name': 'HTTPS Trust Signal', 'weight': 10, 'score': pts, 'max': 10,
-                        'status': self._pts_status(pts, 10), 'detail': note})
-        score += pts; max_score += 10
-
-        # --- Page Speed (TTFB) ---
-        rt = self.response_time
-        if rt < 0.5:
-            pts, note = 10, f'Excellent TTFB: {rt:.2f}s'
-        elif rt < 1.0:
-            pts, note = 8, f'Good TTFB: {rt:.2f}s'
-        elif rt < 2.0:
-            pts, note = 5, f'Slow TTFB: {rt:.2f}s — investigate server performance'
-        elif rt < 4.0:
-            pts, note = 2, f'Very slow: {rt:.2f}s — 53% of users leave after 3s'
-        else:
-            pts, note = 0, f'Critical: {rt:.2f}s TTFB — site is painfully slow'
-        checks.append({'name': 'Page Speed (TTFB)', 'weight': 10, 'score': pts, 'max': 10,
-                        'status': self._pts_status(pts, 10), 'detail': note})
-        score += pts; max_score += 10
-
-        # --- Form Usability ---
-        forms = soup.find_all('form')
-        inputs = soup.find_all('input')
-        labels = soup.find_all('label')
-        autocomplete = [i for i in inputs if i.get('autocomplete')]
-        form_pts = 0; form_notes = []
-        if forms:
-            form_pts += 5; form_notes.append(f'{len(forms)} form(s) detected')
-            if autocomplete:
-                form_pts += 5; form_notes.append(f'{len(autocomplete)} fields with autocomplete ✓')
+            apply_pts = 0; apply_notes = []
+            if len(apply_btns) >= 2:
+                apply_pts += 10; apply_notes.append(f'{len(apply_btns)} Apply buttons ✓')
+            elif apply_btns:
+                apply_pts += 6; apply_notes.append(f'{len(apply_btns)} Apply button found')
             else:
-                form_notes.append('No autocomplete attributes on inputs')
+                apply_notes.append('No Apply button detected — how do candidates apply?')
+
+            if field_count <= 5:
+                apply_pts += 5; apply_notes.append(f'{field_count} form fields — streamlined ✓')
+            elif field_count <= 10:
+                apply_pts += 3; apply_notes.append(f'{field_count} form fields — acceptable')
+            elif field_count > 10:
+                apply_notes.append(f'{field_count} form fields — too many, simplify the apply flow')
+
+            if has_job_search:
+                apply_pts += 5; apply_notes.append('Job search detected ✓')
+            else:
+                apply_notes.append('No job search — candidates cannot find relevant roles')
+
+            apply_pts = min(apply_pts, 20)
+            checks.append({'name': 'Apply Flow & Job Search', 'weight': 20, 'score': apply_pts, 'max': 20,
+                            'status': self._pts_status(apply_pts, 20), 'detail': ' | '.join(apply_notes)})
+            score += apply_pts; max_score += 20
+
+            # --- ATS Platform Detection (15pts) ---
+            ats_check = self._detect_ats()
+            checks.append(ats_check)
+            score += ats_check['score']; max_score += ats_check['max']
+
+            # --- Navigation (10pts) ---
+            nav_tags = soup.find_all('nav')
+            breadcrumb_html = bool(soup.find(class_=re.compile(r'breadcrumb', re.I)))
+            schema_types = self._get_schema_types()
+            has_breadcrumb_schema = 'BreadcrumbList' in schema_types
+            nav_pts = 0; nav_notes = []
+            if nav_tags:
+                nav_pts += 7; nav_notes.append(f'{len(nav_tags)} <nav> element(s) ✓')
+            else:
+                nav_notes.append('No semantic <nav> — navigation not machine-readable')
+            if has_breadcrumb_schema or breadcrumb_html:
+                nav_pts += 3; nav_notes.append('Breadcrumbs present ✓')
+            checks.append({'name': 'Navigation & Structure', 'weight': 10, 'score': nav_pts, 'max': 10,
+                            'status': self._pts_status(nav_pts, 10), 'detail': ' | '.join(nav_notes)})
+            score += nav_pts; max_score += 10
+
+            # --- HTTPS Trust Signal (8pts) ---
+            is_https = self.url.startswith('https://')
+            pts = 8 if is_https else 0
+            note = 'HTTPS ✓ — candidates trust this site' if is_https else 'Not HTTPS — browsers show "Not Secure" warning to candidates'
+            checks.append({'name': 'HTTPS Trust Signal', 'weight': 8, 'score': pts, 'max': 8,
+                            'status': self._pts_status(pts, 8), 'detail': note})
+            score += pts; max_score += 8
+
+            # --- Page Speed (TTFB) (10pts) ---
+            rt = self.response_time
+            if rt < 0.5:
+                pts, note = 10, f'Excellent TTFB: {rt:.2f}s'
+            elif rt < 1.0:
+                pts, note = 8, f'Good TTFB: {rt:.2f}s'
+            elif rt < 2.0:
+                pts, note = 5, f'Slow TTFB: {rt:.2f}s — investigate server performance'
+            elif rt < 4.0:
+                pts, note = 2, f'Very slow: {rt:.2f}s — 53% of users leave after 3s'
+            else:
+                pts, note = 0, f'Critical: {rt:.2f}s TTFB — site is painfully slow'
+            checks.append({'name': 'Page Speed (TTFB)', 'weight': 10, 'score': pts, 'max': 10,
+                            'status': self._pts_status(pts, 10), 'detail': note})
+            score += pts; max_score += 10
+
+            # --- Form Usability (10pts) ---
+            forms = soup.find_all('form')
+            inputs = soup.find_all('input')
+            autocomplete = [i for i in inputs if i.get('autocomplete')]
+            form_pts = 0; form_notes = []
+            if forms:
+                form_pts += 5; form_notes.append(f'{len(forms)} form(s) detected')
+                if autocomplete:
+                    form_pts += 5; form_notes.append(f'{len(autocomplete)} fields with autocomplete ✓')
+                else:
+                    form_notes.append('No autocomplete attributes on inputs')
+            else:
+                form_notes.append('No forms detected')
+            form_pts = min(form_pts, 10)
+            checks.append({'name': 'Form Usability', 'weight': 10, 'score': form_pts, 'max': 10,
+                            'status': self._pts_status(form_pts, 10), 'detail': ' | '.join(form_notes)})
+            score += form_pts; max_score += 10
+
         else:
-            form_notes.append('No forms detected')
-        form_pts = min(form_pts, 10)
-        checks.append({'name': 'Form Usability', 'weight': 10, 'score': form_pts, 'max': 10,
-                        'status': self._pts_status(form_pts, 10), 'detail': ' | '.join(form_notes)})
-        score += form_pts; max_score += 10
+            # recruitment mode (and fallback) — original logic unchanged
+            # --- Mobile Readiness ---
+            viewport = soup.find('meta', attrs={'name': re.compile(r'^viewport$', re.I)})
+            if viewport:
+                content = (viewport.get('content') or '').lower()
+                if 'width=device-width' in content:
+                    pts, note = 15, 'Responsive viewport configured correctly ✓'
+                else:
+                    pts, note = 7, f'Viewport meta present but not optimal: {content[:60]}'
+            else:
+                pts, note = 0, 'No viewport meta — site will appear broken on mobile (60%+ of job searches)'
+            checks.append({'name': 'Mobile Readiness', 'weight': 15, 'score': pts, 'max': 15,
+                            'status': self._pts_status(pts, 15), 'detail': note})
+            score += pts; max_score += 15
+
+            # --- Accessibility ---
+            html_tag = soup.find('html')
+            lang = (html_tag.get('lang') or '') if html_tag else ''
+            images = soup.find_all('img')
+            imgs_with_alt = [i for i in images if i.get('alt') is not None]
+            lang_pts = 5 if lang else 0
+            lang_note = f'lang="{lang}" ✓' if lang else 'Missing lang attribute on <html>'
+            if images:
+                ratio = len(imgs_with_alt) / len(images)
+                if ratio >= 0.9:
+                    alt_pts, alt_note = 10, f'{len(imgs_with_alt)}/{len(images)} images have alt text ✓'
+                elif ratio >= 0.6:
+                    alt_pts, alt_note = 6, f'{len(imgs_with_alt)}/{len(images)} images have alt text'
+                else:
+                    alt_pts, alt_note = 2, f'Only {len(imgs_with_alt)}/{len(images)} images have alt text — accessibility fail'
+            else:
+                alt_pts, alt_note = 5, 'No images found to evaluate'
+            a11y_pts = lang_pts + alt_pts
+            checks.append({'name': 'Accessibility (WCAG)', 'weight': 15, 'score': a11y_pts, 'max': 15,
+                            'status': self._pts_status(a11y_pts, 15), 'detail': f'{lang_note} | {alt_note}'})
+            score += a11y_pts; max_score += 15
+
+            # --- Apply & Job Search ---
+            apply_btns = soup.find_all(
+                lambda t: t.name in ['a', 'button'] and
+                re.search(r'\bapply\b', t.get_text(), re.I)
+            )
+            page_text_lower = soup.get_text().lower()
+            search_box = (soup.find('input', attrs={'type': 'search'}) or
+                          soup.find('input', placeholder=re.compile(r'search|job|role|keyword', re.I)) or
+                          soup.find('input', id=re.compile(r'search|job', re.I)))
+            search_form = (soup.find('form', id=re.compile(r'search', re.I)) or
+                           soup.find('form', class_=re.compile(r'search|job-search', re.I)))
+            has_job_search = bool(search_box or search_form or 'job search' in page_text_lower)
+
+            apply_pts = 0; apply_notes = []
+            if len(apply_btns) >= 2:
+                apply_pts += 15; apply_notes.append(f'{len(apply_btns)} Apply buttons ✓')
+            elif apply_btns:
+                apply_pts += 10; apply_notes.append(f'{len(apply_btns)} Apply button found')
+            else:
+                apply_notes.append('No Apply button detected — how do candidates apply?')
+            if has_job_search:
+                apply_pts += 10; apply_notes.append('Job search detected ✓')
+            else:
+                apply_notes.append('No job search — candidates cannot find relevant roles')
+            checks.append({'name': 'Apply Flow & Job Search', 'weight': 25, 'score': apply_pts, 'max': 25,
+                            'status': self._pts_status(apply_pts, 25), 'detail': ' | '.join(apply_notes)})
+            score += apply_pts; max_score += 25
+
+            # --- Navigation ---
+            nav_tags = soup.find_all('nav')
+            breadcrumb_html = bool(soup.find(class_=re.compile(r'breadcrumb', re.I)))
+            schema_types = self._get_schema_types()
+            has_breadcrumb_schema = 'BreadcrumbList' in schema_types
+            nav_pts = 0; nav_notes = []
+            if nav_tags:
+                nav_pts += 10; nav_notes.append(f'{len(nav_tags)} <nav> element(s) ✓')
+            else:
+                nav_notes.append('No semantic <nav> — navigation not machine-readable')
+            if has_breadcrumb_schema or breadcrumb_html:
+                nav_pts += 5; nav_notes.append('Breadcrumbs present ✓')
+            checks.append({'name': 'Navigation & Structure', 'weight': 15, 'score': nav_pts, 'max': 15,
+                            'status': self._pts_status(nav_pts, 15), 'detail': ' | '.join(nav_notes)})
+            score += nav_pts; max_score += 15
+
+            # --- HTTPS Trust Signal ---
+            is_https = self.url.startswith('https://')
+            pts = 10 if is_https else 0
+            note = 'HTTPS ✓ — candidates trust this site' if is_https else 'Not HTTPS — browsers show "Not Secure" warning to candidates'
+            checks.append({'name': 'HTTPS Trust Signal', 'weight': 10, 'score': pts, 'max': 10,
+                            'status': self._pts_status(pts, 10), 'detail': note})
+            score += pts; max_score += 10
+
+            # --- Page Speed (TTFB) ---
+            rt = self.response_time
+            if rt < 0.5:
+                pts, note = 10, f'Excellent TTFB: {rt:.2f}s'
+            elif rt < 1.0:
+                pts, note = 8, f'Good TTFB: {rt:.2f}s'
+            elif rt < 2.0:
+                pts, note = 5, f'Slow TTFB: {rt:.2f}s — investigate server performance'
+            elif rt < 4.0:
+                pts, note = 2, f'Very slow: {rt:.2f}s — 53% of users leave after 3s'
+            else:
+                pts, note = 0, f'Critical: {rt:.2f}s TTFB — site is painfully slow'
+            checks.append({'name': 'Page Speed (TTFB)', 'weight': 10, 'score': pts, 'max': 10,
+                            'status': self._pts_status(pts, 10), 'detail': note})
+            score += pts; max_score += 10
+
+            # --- Form Usability ---
+            forms = soup.find_all('form')
+            inputs = soup.find_all('input')
+            labels = soup.find_all('label')
+            autocomplete = [i for i in inputs if i.get('autocomplete')]
+            form_pts = 0; form_notes = []
+            if forms:
+                form_pts += 5; form_notes.append(f'{len(forms)} form(s) detected')
+                if autocomplete:
+                    form_pts += 5; form_notes.append(f'{len(autocomplete)} fields with autocomplete ✓')
+                else:
+                    form_notes.append('No autocomplete attributes on inputs')
+            else:
+                form_notes.append('No forms detected')
+            form_pts = min(form_pts, 10)
+            checks.append({'name': 'Form Usability', 'weight': 10, 'score': form_pts, 'max': 10,
+                            'status': self._pts_status(form_pts, 10), 'detail': ' | '.join(form_notes)})
+            score += form_pts; max_score += 10
 
         pct = round(score / max_score * 100) if max_score else 0
         return {
@@ -940,6 +1088,53 @@ class CareerSiteGrader:
             'grade': self._score_to_grade(pct),
             'checks': checks,
             'summary': self._cx_summary(pct),
+        }
+
+    def _detect_ats(self) -> Dict:
+        """Detect ATS platforms from HTML content and iframe sources."""
+        ATS_PATTERNS = {
+            'Greenhouse':      r'greenhouse\.io|boards\.greenhouse|grnh\.se',
+            'Lever':           r'lever\.co|jobs\.lever\.co',
+            'Workday':         r'workday\.com|myworkdayjobs\.com|wd\d+\.myworkdayjobs',
+            'Taleo':           r'taleo\.net|oracle.*taleo',
+            'iCIMS':           r'icims\.com|careers-.*\.icims',
+            'SmartRecruiters': r'smartrecruiters\.com|jobs\.smartrecruiters',
+            'BambooHR':        r'bamboohr\.com',
+            'Jobvite':         r'jobvite\.com|jobs\.jobvite',
+            'Ashby':           r'ashbyhq\.com|jobs\.ashbyhq',
+            'Breezy':          r'breezy\.hr',
+            'Workable':        r'workable\.com|apply\.workable',
+            'JazzHR':          r'jazzhr\.com|app\.jazz\.co',
+            'Recruitee':       r'recruitee\.com',
+            'Pinpoint':        r'pinpointhq\.com',
+        }
+
+        html_lower = self.html.lower()
+        # Also gather iframe src values
+        iframes = self.soup.find_all('iframe') if self.soup else []
+        iframe_srcs = ' '.join((f.get('src', '') or '') for f in iframes).lower()
+        combined = f'{html_lower} {iframe_srcs}'
+
+        detected = []
+        for name, pattern in ATS_PATTERNS.items():
+            if re.search(pattern, combined, re.I):
+                detected.append(name)
+
+        if detected:
+            pts = 15
+            note = f'ATS detected: {", ".join(detected)} ✓ — integrated hiring technology confirmed'
+        else:
+            pts = 0
+            note = 'No ATS platform detected — consider integrating an ATS for streamlined hiring'
+
+        return {
+            'name': 'ATS Platform Detection',
+            'weight': 15,
+            'score': pts,
+            'max': 15,
+            'status': self._pts_status(pts, 15),
+            'detail': note,
+            'value': ', '.join(detected) if detected else None,
         }
 
     def _cx_summary(self, score):
