@@ -2057,7 +2057,7 @@ class CareerSiteGrader:
     # -------------------------------------------------------------------------
 
     def _generate_recommendations(self, pillars: Dict) -> List[Dict]:
-        IMPACT = {
+        IMPACT_RECRUITMENT = {
             'Title Tag': 'Directly controls click-through rate from search results',
             'Meta Description': 'Google uses this in SERPs — affects CTR by up to 30%',
             'Schema / Structured Data': 'Enables rich snippets — up to 3× higher CTR from search',
@@ -2086,6 +2086,49 @@ class CareerSiteGrader:
             'Indexability': 'If noindex is set, your page will not appear in any search results',
             'Canonical URL': 'Prevents duplicate content from splitting your ranking signals',
         }
+
+        IMPACT_CAREER = {
+            'Title Tag': 'Top talent judges your company within seconds of seeing search results',
+            'Meta Description': 'Controls how your careers page appears in Google — affects talent CTR by 30%',
+            'Schema / Structured Data': 'JobPosting schema gets your roles into Google Jobs — critical for career sites',
+            'ATS Platform Detection': 'A properly integrated ATS ensures candidates can actually complete applications',
+            'Culture & Team Content': 'Top talent wants to see the real culture before applying',
+            'Employee Stories & Testimonials': 'Authentic employee voices are the #1 factor in career site credibility',
+            'EVP & Pay Transparency': '67% of candidates research compensation before applying — transparency wins',
+            'DE&I Commitment': 'Diverse candidates actively seek out DE&I commitment before applying',
+            'Mobile Readiness': '60%+ of career site visits come from mobile',
+            'Apply Flow & Job Search': 'Complex application forms cause 60% of candidates to abandon',
+            'Video Content': 'Video on career sites increases application intent by 34%',
+            'Live Chat & Chatbot': 'Chatbots reduce career site bounce by up to 40%',
+        }
+
+        IMPACT_GENERAL = {
+            'Title Tag': 'Controls click-through rate from search results',
+            'Meta Description': 'Directly affects how your page appears in Google — up to 30% CTR impact',
+            'Schema / Structured Data': 'Enables rich snippets and better AI understanding',
+            'Sitemap.xml': 'Search engines need this to discover and crawl all your pages',
+            'Strict-Transport-Security': 'Without HSTS, browsers can be downgraded to insecure HTTP',
+            'Content-Security-Policy': 'Without CSP, your site is vulnerable to XSS injection attacks',
+            'Privacy & Cookie Policy': 'Required by GDPR/CCPA — missing this is a legal risk',
+            'Mobile Readiness': '60%+ of web traffic is mobile — this is table stakes',
+            'Accessibility (WCAG)': 'Accessibility failures exclude users and create legal liability',
+            'Content Depth': 'Thin content ranks poorly and provides no value to visitors',
+            'Analytics & Tracking': 'Without analytics you have zero visibility into what works',
+            'Server Response (TTFB)': 'Each second of delay reduces conversions by 7%',
+            'HTTPS / SSL': 'Non-HTTPS sites show warnings and rank lower in Google',
+            'Search Functionality': 'Visitors who use search convert at 2-3× higher rates',
+        }
+
+        if self.mode == 'career_site':
+            IMPACT = IMPACT_CAREER
+            default_impact = 'Affects overall candidate experience and talent attraction'
+        elif self.mode == 'general':
+            IMPACT = IMPACT_GENERAL
+            default_impact = 'Affects overall site performance'
+        else:
+            IMPACT = IMPACT_RECRUITMENT
+            default_impact = 'Affects overall talent attraction performance'
+
         recs = []
         for pillar_data in pillars.values():
             for check in pillar_data.get('checks', []):
@@ -2096,7 +2139,7 @@ class CareerSiteGrader:
                         'pillar_color': pillar_data.get('color', '#6366f1'),
                         'check': check['name'],
                         'detail': check['detail'],
-                        'impact': IMPACT.get(check['name'], 'Affects overall talent attraction performance'),
+                        'impact': IMPACT.get(check['name'], default_impact),
                     })
         recs.sort(key=lambda x: 0 if x['priority'] == 'critical' else 1)
         return recs[:15]
@@ -2119,15 +2162,29 @@ class CareerSiteGrader:
             })
 
         if all_checks.get('Apply Flow & Job Search') != 'pass':
-            features.append({
-                'gap': 'No job search or weak apply flow',
-                'feature': 'AI-Powered Job Search & One-Click Apply',
-                'description': 'Instant AI-matched job search, smart filters by location/salary/type, and a streamlined mobile-first apply flow — all built in.',
-                'icon': 'search',
-                'stat': 'Up to 60% more completed applications',
-            })
+            if self.mode == 'career_site':
+                features.append({
+                    'gap': 'Weak or broken application flow',
+                    'feature': 'Streamlined Career Application Flow',
+                    'description': 'Shazamme career sites deliver a seamless, mobile-first application experience — integrated with your ATS and optimised to minimise drop-off at every step.',
+                    'icon': 'search',
+                    'stat': 'Up to 60% more completed applications',
+                })
+            else:
+                features.append({
+                    'gap': 'No job search or weak apply flow',
+                    'feature': 'AI-Powered Job Search & One-Click Apply',
+                    'description': 'Instant AI-matched job search, smart filters by location/salary/type, and a streamlined mobile-first apply flow — all built in.',
+                    'icon': 'search',
+                    'stat': 'Up to 60% more completed applications',
+                })
 
-        if all_checks.get('Job Alerts & Lead Capture') != 'pass':
+        # Support both check name variants across modes
+        alerts_check = (
+            all_checks.get('Job Alerts & Lead Capture')
+            or all_checks.get('Lead Capture / Newsletter')
+        )
+        if alerts_check != 'pass':
             features.append({
                 'gap': 'No job alerts or lead capture',
                 'feature': 'Intelligent Job Alert Engine',
@@ -2181,7 +2238,7 @@ class CareerSiteGrader:
                 'stat': '2× candidate quality with transparent EVP',
             })
 
-        if all_checks.get('Industry & Sector Pages') != 'pass':
+        if self.mode == 'recruitment' and all_checks.get('Industry & Sector Pages') != 'pass':
             features.append({
                 'gap': 'Missing or insufficient sector/industry pages',
                 'feature': 'Sector Page Generator',
