@@ -1414,6 +1414,358 @@ class CareerSiteGrader:
         return "Very weak employer brand. You're competing for talent with nothing to differentiate you."
 
     # -------------------------------------------------------------------------
+    # Pillar: Security & Trust  (general mode)
+    # -------------------------------------------------------------------------
+
+    async def _analyze_security(self) -> Dict:
+        """Security & Trust pillar for general mode."""
+        soup = self.soup
+        checks = []
+        score = 0
+        max_score = 0
+
+        # --- HTTPS ---
+        is_https = self.url.startswith('https://')
+        pts = 20 if is_https else 0
+        note = 'HTTPS secure ✓' if is_https else 'Not HTTPS — browsers warn visitors and Google ranks lower'
+        checks.append({'name': 'HTTPS / SSL', 'weight': 20, 'score': pts, 'max': 20,
+                        'status': self._pts_status(pts, 20), 'detail': note})
+        score += pts; max_score += 20
+
+        # --- Security Headers ---
+        def _check_header(name, header_key, max_pts, present_note, missing_note):
+            val = self.headers.get(header_key, '')
+            pts = max_pts if val else 0
+            note = f'{present_note}: {val[:60]}' if val else missing_note
+            return {'name': name, 'weight': max_pts, 'score': pts, 'max': max_pts,
+                    'status': self._pts_status(pts, max_pts), 'detail': note,
+                    'value': val[:80] if val else None}
+
+        for check_data in [
+            ('Strict-Transport-Security', 'strict-transport-security', 12,
+             'HSTS enabled ✓', 'No HSTS header — browsers can be downgraded to HTTP'),
+            ('Content-Security-Policy', 'content-security-policy', 12,
+             'CSP present ✓', 'No CSP header — vulnerable to XSS injection'),
+            ('X-Content-Type-Options', 'x-content-type-options', 8,
+             'X-Content-Type-Options ✓', 'Missing X-Content-Type-Options: nosniff'),
+            ('X-Frame-Options', 'x-frame-options', 8,
+             'X-Frame-Options ✓', 'Missing X-Frame-Options — clickjacking risk'),
+            ('Referrer-Policy', 'referrer-policy', 8,
+             'Referrer-Policy ✓', 'No Referrer-Policy header'),
+            ('Permissions-Policy', 'permissions-policy', 7,
+             'Permissions-Policy ✓', 'No Permissions-Policy — browser features not restricted'),
+        ]:
+            check = _check_header(*check_data)
+            checks.append(check)
+            score += check['score']; max_score += check['max']
+
+        # --- Privacy / Cookie Policy (15pts) ---
+        privacy_link = soup.find('a', href=re.compile(r'privacy|cookie|gdpr|data.?protection', re.I))
+        cookie_banner = bool(soup.find(class_=re.compile(r'cookie|consent|gdpr', re.I))) or \
+                        bool(re.search(r'cookie.?consent|cookie.?banner|accept.?cookies', self.html.lower()))
+        priv_pts = 0; priv_notes = []
+        if privacy_link:
+            priv_pts += 10; priv_notes.append('Privacy policy page linked ✓')
+        else:
+            priv_notes.append('No privacy policy link found')
+        if cookie_banner:
+            priv_pts += 5; priv_notes.append('Cookie consent detected ✓')
+        priv_pts = min(priv_pts, 15)
+        checks.append({'name': 'Privacy & Cookie Policy', 'weight': 15, 'score': priv_pts, 'max': 15,
+                        'status': self._pts_status(priv_pts, 15), 'detail': ' | '.join(priv_notes)})
+        score += priv_pts; max_score += 15
+
+        # --- Mixed Content (10pts) ---
+        http_resources = soup.find_all(src=re.compile(r'^http://', re.I))
+        if is_https and http_resources:
+            pts = 0
+            note = f'{len(http_resources)} HTTP resource(s) on HTTPS page — mixed content warning'
+        else:
+            pts = 10
+            note = 'No mixed content detected ✓' if is_https else 'Site is not HTTPS'
+        checks.append({'name': 'Mixed Content', 'weight': 10, 'score': pts, 'max': 10,
+                        'status': self._pts_status(pts, 10), 'detail': note})
+        score += pts; max_score += 10
+
+        pct = round(score / max_score * 100) if max_score else 0
+        return {
+            'name': 'Security & Trust',
+            'icon': 'shield',
+            'color': '#f43f5e',
+            'score': pct,
+            'grade': self._score_to_grade(pct),
+            'checks': checks,
+            'summary': self._security_summary(pct),
+        }
+
+    def _security_summary(self, score):
+        if score >= 80: return 'Strong security posture. Headers, HTTPS, and privacy controls are well-configured.'
+        if score >= 60: return 'Decent security but missing some important headers. Review recommendations.'
+        if score >= 40: return 'Several security gaps expose your site and users to risk.'
+        return 'Critical security issues. Your site lacks basic protections against common attacks.'
+
+    # -------------------------------------------------------------------------
+    # Pillar: User Experience  (general mode)
+    # -------------------------------------------------------------------------
+
+    async def _analyze_ux(self) -> Dict:
+        """User Experience pillar for general mode."""
+        soup = self.soup
+        checks = []
+        score = 0
+        max_score = 0
+
+        # --- Mobile Readiness (15pts) ---
+        viewport = soup.find('meta', attrs={'name': re.compile(r'^viewport$', re.I)})
+        if viewport:
+            content = (viewport.get('content') or '').lower()
+            if 'width=device-width' in content:
+                pts, note = 15, 'Responsive viewport ✓'
+            else:
+                pts, note = 7, f'Viewport present but not optimal: {content[:60]}'
+        else:
+            pts, note = 0, 'No viewport meta — site broken on mobile'
+        checks.append({'name': 'Mobile Readiness', 'weight': 15, 'score': pts, 'max': 15,
+                        'status': self._pts_status(pts, 15), 'detail': note})
+        score += pts; max_score += 15
+
+        # --- Accessibility (20pts) ---
+        html_tag = soup.find('html')
+        lang = (html_tag.get('lang') or '') if html_tag else ''
+        images = soup.find_all('img')
+        imgs_with_alt = [i for i in images if i.get('alt') is not None]
+        skip_link = bool(soup.find('a', href='#main')) or bool(soup.find('a', class_=re.compile(r'skip', re.I)))
+        a11y_pts = 0; a11y_notes = []
+        if lang: a11y_pts += 5; a11y_notes.append(f'lang="{lang}" ✓')
+        else: a11y_notes.append('Missing lang attribute')
+        if images:
+            ratio = len(imgs_with_alt) / len(images)
+            if ratio >= 0.9: a11y_pts += 10; a11y_notes.append(f'{len(imgs_with_alt)}/{len(images)} images have alt ✓')
+            elif ratio >= 0.6: a11y_pts += 6; a11y_notes.append(f'{len(imgs_with_alt)}/{len(images)} images have alt')
+            else: a11y_pts += 2; a11y_notes.append(f'Only {len(imgs_with_alt)}/{len(images)} images have alt')
+        else:
+            a11y_pts += 5; a11y_notes.append('No images to evaluate')
+        if skip_link: a11y_pts += 5; a11y_notes.append('Skip navigation ✓')
+        a11y_pts = min(a11y_pts, 20)
+        checks.append({'name': 'Accessibility (WCAG)', 'weight': 20, 'score': a11y_pts, 'max': 20,
+                        'status': self._pts_status(a11y_pts, 20), 'detail': ' | '.join(a11y_notes)})
+        score += a11y_pts; max_score += 20
+
+        # --- Navigation (12pts) ---
+        nav_tags = soup.find_all('nav')
+        breadcrumb_html = bool(soup.find(class_=re.compile(r'breadcrumb', re.I)))
+        nav_pts = 0; nav_notes = []
+        if nav_tags: nav_pts += 7; nav_notes.append(f'{len(nav_tags)} <nav> element(s) ✓')
+        else: nav_notes.append('No semantic <nav>')
+        if breadcrumb_html: nav_pts += 5; nav_notes.append('Breadcrumbs ✓')
+        nav_pts = min(nav_pts, 12)
+        checks.append({'name': 'Navigation', 'weight': 12, 'score': nav_pts, 'max': 12,
+                        'status': self._pts_status(nav_pts, 12), 'detail': ' | '.join(nav_notes)})
+        score += nav_pts; max_score += 12
+
+        # --- TTFB (15pts) ---
+        rt = self.response_time
+        if rt < 0.5:   pts, note = 15, f'Excellent TTFB: {rt:.2f}s'
+        elif rt < 1.0:  pts, note = 12, f'Good TTFB: {rt:.2f}s'
+        elif rt < 2.0:  pts, note = 8, f'Average: {rt:.2f}s'
+        elif rt < 4.0:  pts, note = 4, f'Slow: {rt:.2f}s'
+        else:           pts, note = 0, f'Critical: {rt:.2f}s'
+        checks.append({'name': 'Page Speed (TTFB)', 'weight': 15, 'score': pts, 'max': 15,
+                        'status': self._pts_status(pts, 15), 'detail': note})
+        score += pts; max_score += 15
+
+        # --- Font Loading (10pts) ---
+        font_display = bool(re.search(r'font-display\s*:\s*swap', self.html))
+        preload_font = bool(soup.find('link', rel='preload', attrs={'as': 'font'}))
+        font_pts = 0; font_notes = []
+        if font_display: font_pts += 5; font_notes.append('font-display: swap ✓')
+        else: font_notes.append('No font-display: swap — risk of invisible text flash')
+        if preload_font: font_pts += 5; font_notes.append('Font preload ✓')
+        checks.append({'name': 'Font Loading', 'weight': 10, 'score': font_pts, 'max': 10,
+                        'status': self._pts_status(font_pts, 10), 'detail': ' | '.join(font_notes)})
+        score += font_pts; max_score += 10
+
+        # --- Form Usability (8pts) ---
+        forms = soup.find_all('form')
+        labels = soup.find_all('label')
+        autocomplete = [i for i in soup.find_all('input') if i.get('autocomplete')]
+        form_pts = 0; form_notes = []
+        if forms:
+            if labels: form_pts += 4; form_notes.append(f'{len(labels)} labels ✓')
+            else: form_notes.append('Forms without labels')
+            if autocomplete: form_pts += 4; form_notes.append('Autocomplete ✓')
+        else:
+            form_pts = 4; form_notes.append('No forms on page')
+        form_pts = min(form_pts, 8)
+        checks.append({'name': 'Form Usability', 'weight': 8, 'score': form_pts, 'max': 8,
+                        'status': self._pts_status(form_pts, 8), 'detail': ' | '.join(form_notes)})
+        score += form_pts; max_score += 8
+
+        # --- Image Optimization (10pts) ---
+        imgs = soup.find_all('img')
+        with_dims = [i for i in imgs if i.get('width') and i.get('height')]
+        lazy = [i for i in imgs if i.get('loading') == 'lazy']
+        img_pts = 0; img_notes = []
+        if imgs:
+            dim_ratio = len(with_dims) / len(imgs)
+            if dim_ratio >= 0.8: img_pts += 5; img_notes.append(f'{len(with_dims)}/{len(imgs)} images have dimensions ✓')
+            elif dim_ratio >= 0.4: img_pts += 3; img_notes.append(f'{len(with_dims)}/{len(imgs)} images have dimensions')
+            else: img_notes.append('Most images missing width/height — causes CLS')
+            if lazy: img_pts += 5; img_notes.append(f'{len(lazy)} images lazy-loaded ✓')
+            else: img_notes.append('No lazy loading detected')
+        else:
+            img_pts = 5; img_notes.append('No images on page')
+        img_pts = min(img_pts, 10)
+        checks.append({'name': 'Image Optimization', 'weight': 10, 'score': img_pts, 'max': 10,
+                        'status': self._pts_status(img_pts, 10), 'detail': ' | '.join(img_notes)})
+        score += img_pts; max_score += 10
+
+        pct = round(score / max_score * 100) if max_score else 0
+        return {
+            'name': 'User Experience',
+            'icon': 'touch_app',
+            'color': '#22d3ee',
+            'score': pct,
+            'grade': self._score_to_grade(pct),
+            'checks': checks,
+            'summary': self._ux_summary(pct),
+        }
+
+    def _ux_summary(self, score):
+        if score >= 80: return 'Excellent user experience. Mobile-ready, accessible, and well-structured.'
+        if score >= 60: return 'Good UX foundations with some areas for improvement.'
+        if score >= 40: return 'User experience has gaps that are driving visitors away.'
+        return 'Poor UX across multiple dimensions. Visitors are struggling to use this site.'
+
+    # -------------------------------------------------------------------------
+    # Pillar: Content Quality  (general mode)
+    # -------------------------------------------------------------------------
+
+    async def _analyze_content_quality(self) -> Dict:
+        """Content Quality pillar for general mode."""
+        soup = self.soup
+        checks = []
+        score = 0
+        max_score = 0
+        text = soup.get_text()
+        word_count = len(re.findall(r'\w+', text))
+
+        # --- Content Depth (20pts) ---
+        if word_count >= 1000: pts, note = 20, f'{word_count:,} words — excellent depth'
+        elif word_count >= 500: pts, note = 14, f'{word_count:,} words — decent depth'
+        elif word_count >= 250: pts, note = 7, f'{word_count:,} words — thin content'
+        else: pts, note = 0, f'Only {word_count:,} words — too thin'
+        checks.append({'name': 'Content Depth', 'weight': 20, 'score': pts, 'max': 20,
+                        'status': self._pts_status(pts, 20), 'detail': note})
+        score += pts; max_score += 20
+
+        # --- Heading Structure (15pts) ---
+        h2s = len(soup.find_all('h2'))
+        h3s = len(soup.find_all('h3'))
+        hd_pts = 0
+        if h2s >= 4: hd_pts += 10
+        elif h2s >= 2: hd_pts += 6
+        if h3s >= 2: hd_pts += 5
+        elif h3s >= 1: hd_pts += 3
+        hd_pts = min(hd_pts, 15)
+        checks.append({'name': 'Heading Structure', 'weight': 15, 'score': hd_pts, 'max': 15,
+                        'status': self._pts_status(hd_pts, 15),
+                        'detail': f'{h2s} H2s, {h3s} H3s'})
+        score += hd_pts; max_score += 15
+
+        # --- Image Alt Text (15pts) ---
+        images = soup.find_all('img')
+        imgs_with_alt = [i for i in images if i.get('alt') is not None]
+        if images:
+            ratio = len(imgs_with_alt) / len(images)
+            if ratio >= 0.9: pts = 15
+            elif ratio >= 0.6: pts = 9
+            else: pts = 3
+            note = f'{len(imgs_with_alt)}/{len(images)} images have alt text'
+        else:
+            pts = 10; note = 'No images to evaluate'
+        checks.append({'name': 'Image Alt Text', 'weight': 15, 'score': pts, 'max': 15,
+                        'status': self._pts_status(pts, 15), 'detail': note})
+        score += pts; max_score += 15
+
+        # --- Image Dimensions (10pts) ---
+        with_dims = [i for i in images if i.get('width') and i.get('height')]
+        if images:
+            ratio = len(with_dims) / len(images)
+            pts = round(10 * min(ratio / 0.8, 1))
+            note = f'{len(with_dims)}/{len(images)} images have explicit dimensions'
+        else:
+            pts = 10; note = 'No images'
+        checks.append({'name': 'Image Dimensions', 'weight': 10, 'score': pts, 'max': 10,
+                        'status': self._pts_status(pts, 10), 'detail': note})
+        score += pts; max_score += 10
+
+        # --- Structured Content (10pts) ---
+        lists = soup.find_all(['ul', 'ol'])
+        tables = soup.find_all('table')
+        sc_pts = 0; sc_notes = []
+        if lists: sc_pts += 5; sc_notes.append(f'{len(lists)} list(s) ✓')
+        if tables: sc_pts += 5; sc_notes.append(f'{len(tables)} table(s) ✓')
+        if not lists and not tables: sc_notes.append('No lists or tables — add structured content')
+        sc_pts = min(sc_pts, 10)
+        checks.append({'name': 'Structured Content', 'weight': 10, 'score': sc_pts, 'max': 10,
+                        'status': self._pts_status(sc_pts, 10), 'detail': ' | '.join(sc_notes)})
+        score += sc_pts; max_score += 10
+
+        # --- Internal Linking (15pts) ---
+        domain = self.parsed.netloc
+        internal_links = [a for a in soup.find_all('a', href=True)
+                          if a.get('href', '').startswith('/') or domain in a.get('href', '')]
+        if len(internal_links) >= 5: pts, note = 15, f'{len(internal_links)} internal links ✓'
+        elif len(internal_links) >= 3: pts, note = 10, f'{len(internal_links)} internal links'
+        elif len(internal_links) >= 1: pts, note = 5, f'{len(internal_links)} internal link(s) — add more'
+        else: pts, note = 0, 'No internal links detected'
+        checks.append({'name': 'Internal Linking', 'weight': 15, 'score': pts, 'max': 15,
+                        'status': self._pts_status(pts, 15), 'detail': note})
+        score += pts; max_score += 15
+
+        # --- External Links (5pts) ---
+        external_links = [a for a in soup.find_all('a', href=True)
+                          if a.get('href', '').startswith('http') and domain not in a.get('href', '')]
+        pts = 5 if external_links else 0
+        note = f'{len(external_links)} outbound link(s) ✓' if external_links else 'No outbound links'
+        checks.append({'name': 'External Links', 'weight': 5, 'score': pts, 'max': 5,
+                        'status': self._pts_status(pts, 5), 'detail': note})
+        score += pts; max_score += 5
+
+        # --- FAQ Content (10pts) ---
+        schema_types = self._get_schema_types()
+        has_faq_schema = 'FAQPage' in schema_types
+        has_faq_html = bool(soup.find(class_=re.compile(r'faq|accordion', re.I))) or \
+                       bool(soup.find(lambda t: t.name in ['h2', 'h3'] and
+                            re.search(r'faq|frequen|question', t.get_text(), re.I)))
+        faq_pts = 0
+        if has_faq_schema: faq_pts += 7
+        if has_faq_html: faq_pts += 3
+        faq_pts = min(faq_pts, 10)
+        note = 'FAQ content detected ✓' if faq_pts else 'No FAQ section — consider adding one'
+        checks.append({'name': 'FAQ Content', 'weight': 10, 'score': faq_pts, 'max': 10,
+                        'status': self._pts_status(faq_pts, 10), 'detail': note})
+        score += faq_pts; max_score += 10
+
+        pct = round(score / max_score * 100) if max_score else 0
+        return {
+            'name': 'Content Quality',
+            'icon': 'article',
+            'color': '#f59e0b',
+            'score': pct,
+            'grade': self._score_to_grade(pct),
+            'checks': checks,
+            'summary': self._content_summary(pct),
+        }
+
+    def _content_summary(self, score):
+        if score >= 80: return 'Excellent content quality. Well-structured, deep, and properly optimised.'
+        if score >= 60: return 'Good content foundations with room for improvement in structure and depth.'
+        if score >= 40: return 'Content quality is below standard. Add depth, structure, and alt text.'
+        return 'Critical content issues. Thin, unstructured content is hurting SEO and engagement.'
+
+    # -------------------------------------------------------------------------
     # Pillar: Technical Performance
     # -------------------------------------------------------------------------
 
