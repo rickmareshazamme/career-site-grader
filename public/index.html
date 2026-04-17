@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Career Site Grader — Powered by Shazamme</title>
-<meta name="description" content="The most comprehensive career site and staffing website grader. Analyse SEO, AI visibility, candidate experience, employer brand, and conversion in seconds.">
+<title>Website Grader — Powered by Shazamme</title>
+<meta name="description" content="The most comprehensive website grader on the planet. Grade recruitment agencies, career sites, and any website across SEO, AI visibility, performance, security, and conversion — in seconds.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
 <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Round" rel="stylesheet">
@@ -189,6 +189,37 @@ body {
   transition: color 0.15s;
 }
 .example-links a:hover { color: var(--cyan); }
+
+.mode-selector {
+  display: flex; gap: 12px; justify-content: center;
+  margin-bottom: 32px; max-width: 680px; width: 100%;
+}
+.mode-card {
+  flex: 1; background: rgba(255,255,255,0.03);
+  border: 1.5px solid var(--border2); border-radius: 14px;
+  padding: 18px 14px; cursor: pointer; text-align: center;
+  transition: border-color 0.2s, background 0.2s, transform 0.15s;
+}
+.mode-card:hover {
+  border-color: rgba(139,92,246,0.3); background: rgba(139,92,246,0.05);
+  transform: translateY(-2px);
+}
+.mode-card.selected {
+  border-color: var(--purple); background: rgba(139,92,246,0.1);
+  box-shadow: 0 0 0 3px rgba(139,92,246,0.15);
+}
+.mode-card-icon { font-size: 28px; margin-bottom: 8px; display: block; }
+.mode-card-label { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
+.mode-card-sub { font-size: 11px; color: var(--text3); line-height: 1.3; }
+.mode-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: rgba(139,92,246,0.12); border: 1px solid rgba(139,92,246,0.3);
+  border-radius: 100px; padding: 3px 10px; font-size: 11px;
+  font-weight: 600; color: var(--purple-l); margin-left: 8px;
+}
+@media (max-width: 640px) {
+  .mode-selector { flex-direction: column; gap: 8px; }
+}
 
 /* Pillar pills */
 .pillars-preview {
@@ -769,15 +800,32 @@ hr.section-divider {
   </div>
 
   <h1 class="hero-title">
-    Is your career site<br>
-    <span class="grad">actually winning talent?</span>
+    Is your website<br>
+    <span class="grad">actually performing?</span>
   </h1>
 
   <p class="hero-sub">
-    The most comprehensive career site grader on the planet. Analyse SEO, AI visibility, candidate experience, employer brand, technical performance, and conversion — in seconds.
+    The most comprehensive website grader on the planet. Analyse SEO, AI visibility, performance, security, and conversion — in seconds.
   </p>
 
   <form class="grade-form" id="grade-form" onsubmit="startGrading(event)">
+    <div class="mode-selector">
+      <div class="mode-card" id="mode-recruitment" onclick="selectMode('recruitment')">
+        <span class="mode-card-icon">🏢</span>
+        <div class="mode-card-label" style="color:var(--cyan)">Recruitment</div>
+        <div class="mode-card-sub">Staffing & recruitment agency websites</div>
+      </div>
+      <div class="mode-card" id="mode-career_site" onclick="selectMode('career_site')">
+        <span class="mode-card-icon">💼</span>
+        <div class="mode-card-label" style="color:var(--purple-l)">Career Site</div>
+        <div class="mode-card-sub">Employer career pages & job portals</div>
+      </div>
+      <div class="mode-card" id="mode-general" onclick="selectMode('general')">
+        <span class="mode-card-icon">🌐</span>
+        <div class="mode-card-label" style="color:var(--green)">Website</div>
+        <div class="mode-card-sub">Any website or landing page</div>
+      </div>
+    </div>
     <div class="input-wrap">
       <span class="url-icon"><span class="material-icons-round">language</span></span>
       <input
@@ -789,18 +837,12 @@ hr.section-divider {
         spellcheck="false"
         aria-label="Career site URL"
       >
-      <button type="submit" id="grade-btn">
+      <button type="submit" id="grade-btn" disabled>
         <span class="material-icons-round">insights</span>
         Grade My Site
       </button>
     </div>
-    <p class="example-links">
-      Try:
-      <a href="#" onclick="fillUrl('https://www.hays.com/en_GB/candidates');return false">hays.com</a>
-      <a href="#" onclick="fillUrl('https://www.michaelpage.com.au');return false">michaelpage.com</a>
-      <a href="#" onclick="fillUrl('https://www.randstad.com');return false">randstad.com</a>
-      <a href="#" onclick="fillUrl('https://www.roberthalf.com.au');return false">roberthalf.com</a>
-    </p>
+    <p class="example-links" id="example-links">Select a mode above to get started</p>
   </form>
 
   <div class="pillars-preview">
@@ -957,8 +999,8 @@ hr.section-divider {
 <footer class="site-footer" id="site-footer">
   <p>
     Built with ❤️ by <a href="https://shazamme.com" target="_blank" rel="noopener">Shazamme</a> &nbsp;·&nbsp;
-    Career Site Grader v2.0 &nbsp;·&nbsp;
-    Covering SEO · GEO · CX · Employer Brand · Performance · Conversion
+    Website Grader v3.0 &nbsp;·&nbsp;
+    Recruitment · Career Sites · Any Website
   </p>
 </footer>
 
@@ -967,6 +1009,13 @@ hr.section-divider {
 // STATE
 // ════════════════════════════════════════════
 let gradeData = null;
+let selectedMode = null;
+
+const modeLabels = {
+  recruitment: 'Recruitment',
+  career_site: 'Career Site',
+  general: 'Website'
+};
 
 // ════════════════════════════════════════════
 // HELPERS
@@ -997,6 +1046,37 @@ function statusIcon(status) {
 function fillUrl(u) {
   $('url-input').value = u;
   $('url-input').focus();
+}
+
+function selectMode(mode) {
+  selectedMode = mode;
+
+  // Toggle selected class on mode cards
+  ['recruitment', 'career_site', 'general'].forEach(m => {
+    const card = $('mode-' + m);
+    if (card) card.classList.toggle('selected', m === mode);
+  });
+
+  // Enable grade button
+  $('grade-btn').disabled = false;
+
+  // Update example links per mode
+  const exLinks = $('example-links');
+  if (mode === 'recruitment') {
+    exLinks.innerHTML = 'Try: <a href="#" onclick="fillUrl(\'https://www.hays.com/en_GB/candidates\');return false">hays.com</a> <a href="#" onclick="fillUrl(\'https://www.michaelpage.com.au\');return false">michaelpage.com</a> <a href="#" onclick="fillUrl(\'https://www.randstad.com\');return false">randstad.com</a>';
+  } else if (mode === 'career_site') {
+    exLinks.innerHTML = 'Try: <a href="#" onclick="fillUrl(\'https://careers.google.com\');return false">careers.google.com</a> <a href="#" onclick="fillUrl(\'https://www.atlassian.com/company/careers\');return false">atlassian.com/careers</a> <a href="#" onclick="fillUrl(\'https://jobs.netflix.com\');return false">jobs.netflix.com</a>';
+  } else if (mode === 'general') {
+    exLinks.innerHTML = 'Try: <a href="#" onclick="fillUrl(\'https://stripe.com\');return false">stripe.com</a> <a href="#" onclick="fillUrl(\'https://www.shopify.com\');return false">shopify.com</a> <a href="#" onclick="fillUrl(\'https://notion.so\');return false">notion.so</a>';
+  }
+
+  // Update placeholder text
+  const placeholders = {
+    recruitment: 'https://www.youragency.com',
+    career_site: 'https://careers.yourcompany.com',
+    general: 'https://yourwebsite.com'
+  };
+  $('url-input').placeholder = placeholders[mode] || 'https://yourwebsite.com';
 }
 
 function setProgress(pct) {
@@ -1031,6 +1111,7 @@ function animateScore(target) {
 // ════════════════════════════════════════════
 function startGrading(e) {
   e.preventDefault();
+  if (!selectedMode) { alert('Please select a grading mode first.'); return; }
   const url = $('url-input').value.trim();
   if (!url) { $('url-input').focus(); return; }
 
@@ -1048,7 +1129,7 @@ function startGrading(e) {
   $('recs-list').innerHTML = '';
   $('shazamme-grid').innerHTML = '';
 
-  const evtSource = new EventSource('/grade?url=' + encodeURIComponent(url));
+  const evtSource = new EventSource('/grade?url=' + encodeURIComponent(url) + '&mode=' + selectedMode);
 
   const checkHistory = [];
 
@@ -1128,7 +1209,7 @@ function renderResults(data) {
   document.querySelector('.site-footer').style.display = '';
 
   // Header
-  $('res-domain').textContent = data.domain;
+  $('res-domain').innerHTML = escHtml(data.domain) + (data.mode ? ' <span class="mode-badge">' + escHtml(modeLabels[data.mode] || data.mode) + '</span>' : '');
 
   // Score
   const color = gradeColor(data.overall_score);
@@ -1157,8 +1238,8 @@ function renderResults(data) {
   // Recommendations
   renderRecs(data.recommendations);
 
-  // Shazamme
-  if (data.shazamme_advantage && data.shazamme_advantage.length) {
+  // Shazamme — hide for general mode
+  if (data.mode !== 'general' && data.shazamme_advantage && data.shazamme_advantage.length) {
     renderShazamme(data.shazamme_advantage);
   } else {
     $('shazamme-section').style.display = 'none';
@@ -1169,7 +1250,9 @@ function renderPillars(pillars) {
   const grid = $('pillars-grid');
   grid.innerHTML = '';
 
-  const ORDER = ['seo','geo','cx','brand','technical','conversion'];
+  const ORDER = selectedMode === 'general'
+    ? ['seo','security','ux','content','technical','conversion']
+    : ['seo','geo','cx','brand','technical','conversion'];
   ORDER.forEach(key => {
     const p = pillars[key];
     if (!p) return;
@@ -1301,7 +1384,8 @@ function gradeAnother() {
 
 function copyLink() {
   const url = $('url-input').value || '';
-  const shareUrl = window.location.origin + '/?url=' + encodeURIComponent(url);
+  let shareUrl = window.location.origin + '/?url=' + encodeURIComponent(url);
+  if (selectedMode) shareUrl += '&mode=' + encodeURIComponent(selectedMode);
   navigator.clipboard.writeText(shareUrl).then(() => {
     const btn = document.querySelector('[onclick="copyLink()"]');
     const orig = btn.innerHTML;
@@ -1318,10 +1402,19 @@ function copyLink() {
 (function() {
   const params = new URLSearchParams(window.location.search);
   const urlParam = params.get('url');
+  const modeParam = params.get('mode');
+  const validModes = ['recruitment', 'career_site', 'general'];
+
+  if (modeParam && validModes.includes(modeParam)) {
+    selectMode(modeParam);
+  }
+
   if (urlParam) {
     $('url-input').value = urlParam;
-    // Small delay to ensure DOM is ready
-    setTimeout(() => startGrading({ preventDefault: () => {} }), 300);
+    // Only auto-grade if both url and mode are set
+    if (selectedMode) {
+      setTimeout(() => startGrading({ preventDefault: () => {} }), 300);
+    }
   }
 })();
 </script>
