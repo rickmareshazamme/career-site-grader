@@ -21,11 +21,12 @@ class CareerSiteGrader:
         'Accept-Encoding': 'gzip, deflate, br',
     }
 
-    def __init__(self, url: str):
+    def __init__(self, url: str, mode: str = 'recruitment'):
         self.raw_url = url
         self.url = self._normalize_url(url)
         self.parsed = urlparse(self.url)
         self.base_url = f"{self.parsed.scheme}://{self.parsed.netloc}"
+        self.mode = mode
         self.soup: Optional[BeautifulSoup] = None
         self.html = ''
         self.response_time = 0.0
@@ -34,6 +35,8 @@ class CareerSiteGrader:
         self.robots_txt = ''
         self.has_llms_txt = False
         self.llm_info_url: Optional[str] = None   # path that returned 200 for llm-info
+        self.has_sitemap = False
+        self.sitemap_url: Optional[str] = None
         self.errors: List[str] = []
 
     def _normalize_url(self, url: str) -> str:
@@ -62,16 +65,50 @@ class CareerSiteGrader:
 
         # Parallel secondary fetches
         yield {'type': 'status', 'message': 'Checking AI crawler access and robots.txt...', 'progress': 18}
-        await asyncio.gather(self._fetch_robots_txt(), self._check_llms_txt(), self._check_llm_info())
+        secondary_fetches = [self._fetch_robots_txt(), self._check_llms_txt(), self._check_llm_info()]
+        if self.mode == 'general':
+            secondary_fetches.append(self._check_sitemap())
+        await asyncio.gather(*secondary_fetches)
 
-        pillars_config = [
-            ('seo',        'SEO & Discoverability',    self._analyze_seo,        28),
-            ('geo',        'GEO & AI Visibility',       self._analyze_geo,        40),
-            ('cx',         'Candidate Experience',      self._analyze_cx,         55),
-            ('brand',      'Employer Brand & Content',  self._analyze_brand,      70),
-            ('technical',  'Technical Performance',     self._analyze_technical,  83),
-            ('conversion', 'Conversion & Engagement',   self._analyze_conversion, 94),
-        ]
+        if self.mode == 'recruitment':
+            pillars_config = [
+                ('seo',        'SEO & Discoverability',    self._analyze_seo,        28),
+                ('geo',        'GEO & AI Visibility',       self._analyze_geo,        40),
+                ('cx',         'Candidate Experience',      self._analyze_cx,         55),
+                ('brand',      'Employer Brand & Content',  self._analyze_brand,      70),
+                ('technical',  'Technical Performance',     self._analyze_technical,  83),
+                ('conversion', 'Conversion & Engagement',   self._analyze_conversion, 94),
+            ]
+            weights = {
+                'seo': 0.22, 'geo': 0.20, 'cx': 0.22,
+                'brand': 0.14, 'technical': 0.13, 'conversion': 0.09,
+            }
+        elif self.mode == 'career_site':
+            pillars_config = [
+                ('seo',        'SEO & Discoverability',    self._analyze_seo,        28),
+                ('geo',        'GEO & AI Visibility',       self._analyze_geo,        40),
+                ('cx',         'Candidate Experience',      self._analyze_cx,         55),
+                ('brand',      'Employer Brand & Content',  self._analyze_brand,      70),
+                ('technical',  'Technical Performance',     self._analyze_technical,  83),
+                ('conversion', 'Conversion & Engagement',   self._analyze_conversion, 94),
+            ]
+            weights = {
+                'seo': 0.18, 'geo': 0.15, 'cx': 0.25,
+                'brand': 0.25, 'technical': 0.10, 'conversion': 0.07,
+            }
+        else:  # general
+            pillars_config = [
+                ('seo',        'SEO & Discoverability',    self._analyze_seo,        28),
+                ('security',   'Security & Trust',          self._analyze_security,   40),
+                ('ux',         'User Experience',            self._analyze_ux,         55),
+                ('content',    'Content Quality',            self._analyze_content_quality, 70),
+                ('technical',  'Technical Performance',     self._analyze_technical,  83),
+                ('conversion', 'Conversion & Engagement',   self._analyze_conversion, 94),
+            ]
+            weights = {
+                'seo': 0.22, 'security': 0.18, 'ux': 0.20,
+                'content': 0.15, 'technical': 0.15, 'conversion': 0.10,
+            }
 
         pillar_results: Dict[str, Dict] = {}
         for pillar_id, pillar_name, fn, progress in pillars_config:
@@ -80,19 +117,11 @@ class CareerSiteGrader:
             pillar_results[pillar_id] = result
             yield {'type': 'pillar_complete', 'pillar': pillar_id, 'data': result}
 
-        weights = {
-            'seo': 0.22,
-            'geo': 0.20,
-            'cx': 0.22,
-            'brand': 0.14,
-            'technical': 0.13,
-            'conversion': 0.09,
-        }
         overall = sum(pillar_results[p]['score'] * w for p, w in weights.items())
         overall = round(overall)
 
         recommendations = self._generate_recommendations(pillar_results)
-        shazamme_items = self._generate_shazamme_advantage(pillar_results)
+        shazamme_items = self._generate_shazamme_advantage(pillar_results) if self.mode != 'general' else []
 
         text_content = self.soup.get_text() if self.soup else ''
         word_count = len(re.findall(r'\w+', text_content))
@@ -110,6 +139,7 @@ class CareerSiteGrader:
             'pillars': pillar_results,
             'recommendations': recommendations,
             'shazamme_advantage': shazamme_items,
+            'mode': self.mode,
             'progress': 100,
         }
 
@@ -180,6 +210,21 @@ class CareerSiteGrader:
                                 return
                     except Exception:
                         continue
+        except Exception:
+            pass
+
+    async def _check_sitemap(self):
+        """Check for sitemap.xml — used in general mode."""
+        try:
+            url = urljoin(self.base_url, '/sitemap.xml')
+            async with aiohttp.ClientSession() as sess:
+                async with sess.get(url, headers=self.HEADERS, timeout=aiohttp.ClientTimeout(total=6)) as resp:
+                    if resp.status == 200:
+                        content_type = resp.headers.get('content-type', '')
+                        body = await resp.text()
+                        if 'xml' in content_type or '<urlset' in body or '<sitemapindex' in body:
+                            self.has_sitemap = True
+                            self.sitemap_url = url
         except Exception:
             pass
 
