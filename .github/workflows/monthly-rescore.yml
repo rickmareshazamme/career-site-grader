@@ -1,0 +1,22 @@
+name: Monthly re-score
+
+# Re-grades every active monitor subscription so subscribers see their
+# AI-visibility trend over time. Runs 06:00 UTC on the 1st of each month.
+on:
+  schedule:
+    - cron: '0 6 1 * *'
+  workflow_dispatch: {}
+
+jobs:
+  rescore:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger re-score endpoint
+        run: |
+          if [ -z "${{ secrets.CRON_TOKEN }}" ]; then
+            echo "CRON_TOKEN secret not set — skipping."; exit 0
+          fi
+          code=$(curl -s -o /tmp/out.json -w "%{http_code}" --max-time 600 \
+            "https://career-site-grader-production.up.railway.app/cron/rescore?token=${{ secrets.CRON_TOKEN }}")
+          echo "HTTP $code"; cat /tmp/out.json
+          test "$code" = "200"

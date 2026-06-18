@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Methodology — Shazamme Career Site Grader</title>
+<meta name="description" content="How the Shazamme GEO Score works: the methodology, pillars, weighting and AI-visibility signals behind the recruitment industry's career-site grader.">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0a0a12; --surface:#13131f; --border:rgba(255,255,255,0.09);
+    --text1:#f1f1f6; --text2:#b4b4c4; --text3:#7a7a8c;
+    --purple:#8b5cf6; --cyan:#22d3ee; --green:#10b981; --amber:#f59e0b; --rose:#f43f5e; --indigo:#6366f1;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text1);font-family:'Inter',system-ui,sans-serif;line-height:1.65;}
+  .wrap{max-width:860px;margin:0 auto;padding:64px 24px 96px;}
+  a{color:var(--cyan);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .back{font-size:14px;color:var(--text3);display:inline-block;margin-bottom:32px}
+  h1{font-size:38px;font-weight:800;letter-spacing:-0.02em;line-height:1.15;margin-bottom:14px;
+     background:linear-gradient(120deg,#fff,#c4b5fd);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;}
+  .version{display:inline-block;font-size:12px;font-weight:600;color:#c4b5fd;background:rgba(139,92,246,0.15);
+     border:1px solid rgba(139,92,246,0.3);border-radius:20px;padding:4px 12px;margin-bottom:28px}
+  .lead{font-size:18px;color:var(--text2);margin-bottom:40px}
+  h2{font-size:24px;font-weight:700;margin:44px 0 14px;letter-spacing:-0.01em}
+  h3{font-size:17px;font-weight:700;margin:26px 0 8px;color:var(--text1)}
+  p{color:var(--text2);margin-bottom:14px}
+  ul{margin:0 0 16px 20px;color:var(--text2)}
+  li{margin-bottom:7px}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:22px 24px;margin:18px 0}
+  table{width:100%;border-collapse:collapse;margin:18px 0;font-size:14px}
+  th,td{text-align:left;padding:11px 14px;border-bottom:1px solid var(--border)}
+  th{color:var(--text3);font-size:12px;text-transform:uppercase;letter-spacing:0.04em}
+  td:last-child,th:last-child{text-align:right}
+  .pill{display:inline-block;font-size:12px;font-weight:600;padding:3px 10px;border-radius:20px;margin-right:6px}
+  .footer{margin-top:60px;padding-top:24px;border-top:1px solid var(--border);color:var(--text3);font-size:13px}
+  code{background:rgba(255,255,255,0.06);border-radius:4px;padding:1px 6px;font-size:13px;color:#c4b5fd}
+  .grade-scale span{display:inline-block;margin:4px 8px 4px 0;font-size:13px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <a class="back" href="/">← Back to the grader</a>
+  <div class="version">Methodology v2.3 · Updated June 2026</div>
+  <h1>How the Shazamme GEO Score works</h1>
+  <p class="lead">The Shazamme Career Site Grader measures one thing classic SEO tools miss: whether your site is visible, credible and convertible across <strong>traditional search, AI answer engines (GEO/AEO) and the candidate journey</strong>. This page documents exactly how the score is produced — because a scoring standard should be transparent.</p>
+
+  <h2>The three modes</h2>
+  <p>The engine adapts its pillars and weighting to what is being graded:</p>
+  <ul>
+    <li><strong>Recruitment</strong> — agencies and staffing firms (sector pages, apply flow, employer brand).</li>
+    <li><strong>Career Site</strong> — a single employer's careers/talent site (culture, EVP, DE&I, JobPosting schema).</li>
+    <li><strong>Website</strong> — any general site (security headers, UX, content quality).</li>
+  </ul>
+
+  <h2>Pillars &amp; weighting</h2>
+  <p>Each pillar is scored 0–100 from its own checks, then combined into the overall score using mode-specific weights. Recruitment mode, for example:</p>
+  <div class="card">
+    <table>
+      <thead><tr><th>Pillar</th><th>What it measures</th><th>Weight</th></tr></thead>
+      <tbody>
+        <tr><td>SEO &amp; Discoverability</td><td>Titles, meta, schema validity, sector pages, indexability</td><td>22%</td></tr>
+        <tr><td>GEO &amp; AI Visibility</td><td>AI crawler access, entity/authority, AEO readiness, crawlable content</td><td>20%</td></tr>
+        <tr><td>Candidate Experience</td><td>Mobile, accessibility, apply flow, job search, speed</td><td>22%</td></tr>
+        <tr><td>Employer Brand &amp; Content</td><td>EVP, social proof, video, culture</td><td>14%</td></tr>
+        <tr><td>Technical Performance</td><td>Core Web Vitals, Lighthouse, compression, caching</td><td>13%</td></tr>
+        <tr><td>Conversion &amp; Engagement</td><td>CTAs, job alerts, chat, sharing</td><td>9%</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Within a pillar, every check carries its own point value; the pillar score is the points earned over points available, so adding checks automatically rebalances without distorting the weighting.</p>
+
+  <h2>What makes this different: GEO &amp; AEO</h2>
+  <p>Generative AI is now an answer layer between candidates/clients and your site. We measure readiness for it directly:</p>
+  <ul>
+    <li><strong>AI crawler access</strong> — whether GPTBot, ChatGPT Search (OAI-SearchBot), ClaudeBot, Google-Extended (Gemini/AI Overviews), PerplexityBot, Applebot-Extended and others are permitted in <code>robots.txt</code>.</li>
+    <li><strong>Entity &amp; authority</strong> — Organization schema with <code>sameAs</code> links to Wikidata/LinkedIn/Crunchbase, consistent NAP, named people (E-E-A-T) and accreditations — how AI engines confirm who you are and whether to trust you.</li>
+    <li><strong>Structured-data validity</strong> — not just presence of schema but whether JobPosting carries the fields Google Jobs requires, plus a WebSite SearchAction.</li>
+    <li><strong>AEO / answer-engine readiness</strong> — summary/TL;DR blocks, question-style headings, tables and quotable stats: the content shape AI engines actually cite.</li>
+    <li><strong>Crawlable content</strong> — whether your content (including job listings) exists in the raw HTML or only after JavaScript renders, since most AI crawlers don't run JS.</li>
+    <li><strong>llms.txt / llm-info</strong> — emerging standards that tell AI models how to represent you.</li>
+  </ul>
+
+  <h2>Performance: real Core Web Vitals</h2>
+  <p>Where available, performance uses Google PageSpeed Insights — real Chrome-user field data (CrUX) for LCP, INP and CLS, plus a Lighthouse lab score from a fully-rendered test — not a single server-timing guess.</p>
+
+  <h2>Accuracy notes</h2>
+  <ul>
+    <li><strong>Multi-page &amp; widget-aware:</strong> recruitment/career grades fetch the dedicated job routes (<code>/job-results</code>, <code>/job-detail</code>, etc.) and detect client-rendered job boards, so apply/search aren't falsely marked missing.</li>
+    <li><strong>Single-page snapshot:</strong> the deep content checks evaluate the submitted page plus those job routes — not a full-site crawl.</li>
+    <li><strong>Point-in-time:</strong> scores reflect the moment of the scan; sites change. Monitoring re-scores on a schedule to show the trend.</li>
+  </ul>
+
+  <h2>Grade scale</h2>
+  <div class="card grade-scale">
+    <span><b style="color:var(--green)">A+/A</b> 85–100 World-class / Excellent</span>
+    <span><b style="color:var(--cyan)">B+/B</b> 65–84 Good / Average</span>
+    <span><b style="color:var(--amber)">C+/C</b> 45–64 Below average / Poor</span>
+    <span><b style="color:var(--rose)">D/F</b> 0–44 Critical</span>
+  </div>
+
+  <div class="footer">
+    Shazamme Career Site Grader · Methodology v2.3 · The grader is a diagnostic; for the AI-visibility and apply-flow fixes it surfaces, see <a href="https://www.shazamme.com">Shazamme</a>.
+  </div>
+</div>
+</body>
+</html>

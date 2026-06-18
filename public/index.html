@@ -591,6 +591,31 @@ body {
 .cwv-metric-val { font-size: 22px; font-weight: 700; color: var(--text1); margin: 3px 0; }
 .cwv-badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 20px; }
 
+/* Benchmark line */
+.benchmark-line { display: flex; gap: 14px; align-items: center; justify-content: center; flex-wrap: wrap; margin-top: 14px; }
+.bm-pill { font-size: 13px; color: var(--text1); background: rgba(139,92,246,0.14); border: 1px solid rgba(139,92,246,0.3); border-radius: 20px; padding: 5px 14px; }
+.bm-sub { font-size: 12px; color: var(--text3); }
+.bm-spark { display: inline-flex; align-items: center; gap: 8px; }
+.bm-delta { font-size: 12px; font-weight: 600; }
+
+/* Lead capture */
+.lead-capture { margin-bottom: 24px; }
+.lead-card { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; justify-content: space-between;
+  background: linear-gradient(135deg, rgba(99,102,241,0.12), rgba(34,211,238,0.06));
+  border: 1px solid rgba(99,102,241,0.28); border-radius: 16px; padding: 20px 24px; }
+.lead-card-title { font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+.lead-card-title .material-icons-round { color: #818cf8; font-size: 20px; }
+.lead-card-sub { font-size: 13px; color: var(--text2); margin-top: 5px; max-width: 460px; }
+.lead-form { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.lead-form input[type=email] { padding: 11px 14px; border-radius: 10px; border: 1px solid var(--border);
+  background: rgba(0,0,0,0.25); color: var(--text1); font-size: 14px; min-width: 220px; }
+.lead-monitor { font-size: 12px; color: var(--text2); display: flex; align-items: center; gap: 5px; cursor: pointer; }
+.lead-form button { display: inline-flex; align-items: center; gap: 6px; padding: 11px 18px; border: none; border-radius: 10px;
+  background: linear-gradient(120deg, #8b5cf6, #6366f1); color: #fff; font-weight: 600; font-size: 14px; cursor: pointer; }
+.lead-form button:disabled { opacity: 0.6; cursor: default; }
+.lead-form button .material-icons-round { font-size: 17px; }
+.lead-done { display: flex; align-items: center; gap: 8px; font-size: 14px; color: #34d399; }
+
 /* Competitor table */
 .cmp-rank { font-size: 14px; color: var(--text2); margin-bottom: 12px; }
 .cmp-table-wrap { overflow-x: auto; }
@@ -823,6 +848,22 @@ hr.section-divider {
 .site-footer a { color: var(--purple-l); text-decoration: none; }
 .site-footer a:hover { color: var(--cyan); }
 
+/* Print / PDF */
+@media print {
+  body { background: #fff !important; color: #111 !important; }
+  #hero, #loading, .results-header, .header-actions, .lead-capture,
+  .pillars-preview, .site-footer, #competitor-input, .competitor-wrap { display: none !important; }
+  #results { display: block !important; }
+  .container { max-width: 100% !important; }
+  .exec-card, .cwv-card, .pillar-card, .cmp-table-wrap, .check-help, .check-item, .rec-item,
+  .score-hero { background: #fff !important; color: #111 !important; border: 1px solid #ddd !important;
+    box-shadow: none !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .pillar-card { break-inside: avoid; }
+  .exec-verdict, .check-name, .pillar-name, .section-title, .score-number { color: #111 !important; }
+  .check-detail, .exec-opp-why, .pillar-summary-text { color: #444 !important; }
+  .pillar-card .pillar-checks, .pillar-card.expanded .pillar-checks { max-height: none !important; display: block !important; }
+}
+
 /* ── Responsive ── */
 @media (max-width: 640px) {
   .input-wrap { flex-direction: column; border-radius: 14px; gap: 0; }
@@ -961,6 +1002,9 @@ hr.section-divider {
         <span id="res-domain"></span>
       </div>
       <div class="header-actions">
+        <button class="btn-ghost" onclick="downloadPDF()">
+          <span class="material-icons-round">picture_as_pdf</span> PDF
+        </button>
         <button class="btn-ghost" onclick="copyLink()">
           <span class="material-icons-round">share</span> Share
         </button>
@@ -995,6 +1039,7 @@ hr.section-divider {
 
         <div class="grade-badge" id="res-grade-badge">—</div>
         <div class="grade-label" id="res-grade-label">—</div>
+        <div class="benchmark-line" id="benchmark-line" style="display:none"></div>
 
         <div class="score-meta">
           <div class="score-meta-item">
@@ -1016,6 +1061,22 @@ hr.section-divider {
   </div>
 
   <div class="container">
+
+    <!-- Lead capture -->
+    <div class="lead-capture" id="lead-capture" style="display:none">
+      <div class="lead-card">
+        <div class="lead-card-text">
+          <div class="lead-card-title"><span class="material-icons-round">mail</span> Get this report &amp; track your score</div>
+          <div class="lead-card-sub">We'll email you the full report and (optionally) re-score your site every month so you can see your AI-visibility trend over time.</div>
+        </div>
+        <form class="lead-form" id="lead-form" onsubmit="submitLead(event)">
+          <input type="email" id="lead-email" placeholder="you@company.com" required aria-label="Email">
+          <label class="lead-monitor"><input type="checkbox" id="lead-monitor" checked> Track monthly</label>
+          <button type="submit" id="lead-submit"><span class="material-icons-round">send</span> Send report</button>
+        </form>
+        <div class="lead-done" id="lead-done" style="display:none"></div>
+      </div>
+    </div>
 
     <!-- Executive summary -->
     <div class="exec-summary" id="exec-summary" style="display:none"></div>
@@ -1079,6 +1140,7 @@ hr.section-divider {
   <p>
     Built with ❤️ by <a href="https://shazamme.com" target="_blank" rel="noopener">Shazamme</a> &nbsp;·&nbsp;
     Website Grader v3.0 &nbsp;·&nbsp;
+    <a href="/methodology">Methodology</a> &nbsp;·&nbsp;
     Recruitment · Career Sites · Any Website
   </p>
 </footer>
@@ -1314,6 +1376,10 @@ function renderResults(data) {
   // Scroll to top
   window.scrollTo({ top: 0, behavior: 'smooth' });
 
+  // Benchmark percentile + history, lead capture
+  renderBenchmark(data.benchmark, data.history);
+  setupLeadCapture(data);
+
   // Executive summary, competitor benchmark, Core Web Vitals
   renderExecSummary(data.executive_summary);
   renderComparison(data.comparison, data.pillars);
@@ -1331,6 +1397,84 @@ function renderResults(data) {
   } else {
     $('shazamme-section').style.display = 'none';
   }
+}
+
+function renderBenchmark(bench, hist) {
+  const line = $('benchmark-line');
+  let html = '';
+  if (bench && bench.ready) {
+    const beats = bench.beats_pct;
+    const verb = beats >= 50 ? 'Ahead of' : 'Behind — you beat only';
+    html += `<span class="bm-pill">Beats <strong>${beats}%</strong> of ${bench.sample.toLocaleString()} graded sites</span>`;
+    html += `<span class="bm-sub">Category average: ${bench.average}</span>`;
+  }
+  if (hist && hist.length >= 2) {
+    html += sparkline(hist);
+  }
+  if (html) { line.innerHTML = html; line.style.display = ''; }
+  else { line.style.display = 'none'; }
+}
+
+function sparkline(hist) {
+  const vals = hist.map(h => h.overall);
+  const w = 120, h = 30, max = 100, min = 0;
+  const step = vals.length > 1 ? w / (vals.length - 1) : w;
+  const pts = vals.map((v, i) => `${(i*step).toFixed(1)},${(h - (v-min)/(max-min)*h).toFixed(1)}`).join(' ');
+  const first = vals[0], last = vals[vals.length-1];
+  const delta = last - first;
+  const dColor = delta > 0 ? '#10b981' : (delta < 0 ? '#f43f5e' : '#7a7a8c');
+  const dTxt = delta > 0 ? `▲ +${delta}` : (delta < 0 ? `▼ ${delta}` : '–');
+  return `<span class="bm-spark" title="Score over time">
+    <svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><polyline points="${pts}" fill="none" stroke="#8b5cf6" stroke-width="2" stroke-linejoin="round"/></svg>
+    <span class="bm-delta" style="color:${dColor}">${dTxt} over ${vals.length} scans</span></span>`;
+}
+
+let _leadCtx = null;
+function setupLeadCapture(data) {
+  _leadCtx = { url: data.url, mode: data.mode, overall: data.overall_score };
+  const box = $('lead-capture');
+  const done = $('lead-done');
+  // Reset on each new grade
+  done.style.display = 'none';
+  const form = $('lead-form');
+  if (form) form.style.display = '';
+  // Hide if user already submitted this session for this URL
+  if (window._leadSent && window._leadSent[data.url]) {
+    box.style.display = 'none';
+  } else {
+    box.style.display = '';
+  }
+}
+
+async function submitLead(e) {
+  e.preventDefault();
+  const email = $('lead-email').value.trim();
+  const monitor = $('lead-monitor').checked;
+  const btn = $('lead-submit');
+  if (!email || !_leadCtx) return;
+  btn.disabled = true;
+  try {
+    const res = await fetch('/lead', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, url: _leadCtx.url, mode: _leadCtx.mode, overall: _leadCtx.overall, monitor })
+    });
+    const j = await res.json();
+    if (!j.ok) { alert(j.error || 'Something went wrong.'); btn.disabled = false; return; }
+    window._leadSent = window._leadSent || {};
+    window._leadSent[_leadCtx.url] = true;
+    $('lead-form').style.display = 'none';
+    const done = $('lead-done');
+    done.innerHTML = `<span class="material-icons-round">check_circle</span> Thanks — your report is on its way${j.monitoring ? ", and we'll re-score this site monthly." : '.'}`;
+    done.style.display = '';
+  } catch (err) {
+    alert('Network error. Please try again.');
+    btn.disabled = false;
+  }
+}
+
+function downloadPDF() {
+  window.print();
 }
 
 function renderExecSummary(es) {
