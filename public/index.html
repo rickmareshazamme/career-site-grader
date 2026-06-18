@@ -593,6 +593,9 @@ body {
 .cwv-metric-label small { color: var(--text3); font-weight: 400; }
 .cwv-metric-val { font-size: 22px; font-weight: 700; color: var(--text1); margin: 3px 0; }
 .cwv-badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 20px; }
+.cwv-unavailable { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; color: var(--text2); line-height: 1.5; }
+.cwv-unavailable .material-icons-round { font-size: 17px; color: #818cf8; flex-shrink: 0; margin-top: 1px; }
+.cwv-unavailable a { color: var(--cyan); }
 
 /* Benchmark line */
 .benchmark-line { display: flex; gap: 14px; align-items: center; justify-content: center; flex-wrap: wrap; margin-top: 14px; }
@@ -1386,7 +1389,7 @@ function renderResults(data) {
   // Executive summary, competitor benchmark, Core Web Vitals
   renderExecSummary(data.executive_summary);
   renderComparison(data.comparison, data.pillars);
-  renderCWV(data.core_web_vitals);
+  renderCWV(data.core_web_vitals, data.cwv_attempted);
 
   // Pillars
   renderPillars(data.pillars);
@@ -1511,9 +1514,24 @@ function cwvBadge(rating) {
   return `<span class="cwv-badge" style="background:${m[1]}1f;color:${m[1]}">${m[0]}</span>`;
 }
 
-function renderCWV(cwv) {
+function renderCWV(cwv, attempted) {
   const box = $('cwv-section');
-  if (!cwv || (cwv.perf_score == null && !cwv.has_field)) { box.style.display = 'none'; return; }
+  const hasData = cwv && (cwv.perf_score != null || cwv.has_field);
+  if (!hasData) {
+    if (attempted) {
+      box.style.display = '';
+      box.innerHTML = `
+        <hr class="section-divider">
+        <div class="section-title"><span class="material-icons-round">speed</span> Core Web Vitals</div>
+        <div class="cwv-card"><div class="cwv-unavailable">
+          <span class="material-icons-round">info</span>
+          Google PageSpeed couldn't measure this URL in time — usually a very slow or heavily client-rendered page (which is itself a finding). Try again, or check it directly at <a href="https://pagespeed.web.dev/" target="_blank" rel="noopener">pagespeed.web.dev</a>.
+        </div></div>`;
+    } else {
+      box.style.display = 'none';
+    }
+    return;
+  }
   box.style.display = '';
   const f = cwv.field || {};
   const lab = cwv.lab || {};

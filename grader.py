@@ -33,6 +33,7 @@ class CareerSiteGrader:
         self.psi_key = os.environ.get('PAGESPEED_API_KEY', '')
         self.enable_psi = os.environ.get('ENABLE_PAGESPEED', '1') != '0'
         self.pagespeed: Optional[Dict] = None
+        self.cwv_attempted = False
         self._psi_task = None
         self.soup: Optional[BeautifulSoup] = None
         self.html = ''
@@ -167,6 +168,7 @@ class CareerSiteGrader:
             'shazamme_advantage': shazamme_items,
             'executive_summary': executive_summary,
             'core_web_vitals': self.pagespeed,
+            'cwv_attempted': self.cwv_attempted,
             'mode': self.mode,
             'progress': 100,
         }
@@ -292,14 +294,16 @@ class CareerSiteGrader:
         degrades silently to TTFB-only if no key / quota / timeout. Lighthouse
         also fully renders the page, giving us a rendered-DOM performance signal
         the static fetch cannot measure."""
+        self.cwv_attempted = True
         endpoint = 'https://www.googleapis.com/pagespeedonline/v5/runPagespeed'
-        params = [('url', self.url), ('strategy', 'mobile')]
-        for c in ('performance', 'seo', 'accessibility', 'best-practices'):
-            params.append(('category', c))
+        # Only request the 'performance' category — it carries the perf score +
+        # Core Web Vitals. Requesting all four categories ~3-4x's the Lighthouse
+        # run time and times out on heavy sites.
+        params = [('url', self.url), ('strategy', 'mobile'), ('category', 'performance')]
         if self.psi_key:
             params.append(('key', self.psi_key))
         try:
-            timeout = aiohttp.ClientTimeout(total=35)
+            timeout = aiohttp.ClientTimeout(total=50)
             async with aiohttp.ClientSession(timeout=timeout) as sess:
                 async with sess.get(endpoint, params=params) as resp:
                     if resp.status != 200:
