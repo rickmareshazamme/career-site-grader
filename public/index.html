@@ -596,6 +596,8 @@ body {
 .cwv-unavailable { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; color: var(--text2); line-height: 1.5; }
 .cwv-unavailable .material-icons-round { font-size: 17px; color: #818cf8; flex-shrink: 0; margin-top: 1px; }
 .cwv-unavailable a { color: var(--cyan); }
+.cwv-unavailable .spin { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 
 /* Benchmark line */
 .benchmark-line { display: flex; gap: 14px; align-items: center; justify-content: center; flex-wrap: wrap; margin-top: 14px; }
@@ -1389,7 +1391,7 @@ function renderResults(data) {
   // Executive summary, competitor benchmark, Core Web Vitals
   renderExecSummary(data.executive_summary);
   renderComparison(data.comparison, data.pillars);
-  renderCWV(data.core_web_vitals, data.cwv_attempted);
+  renderCWV(data.core_web_vitals, data.cwv_attempted, data.url, data.mode);
 
   // Pillars
   renderPillars(data.pillars);
@@ -1521,25 +1523,7 @@ function cwvBadge(rating) {
   return `<span class="cwv-badge" style="background:${m[1]}1f;color:${m[1]}">${m[0]}</span>`;
 }
 
-function renderCWV(cwv, attempted) {
-  const box = $('cwv-section');
-  const hasData = cwv && (cwv.perf_score != null || cwv.has_field);
-  if (!hasData) {
-    if (attempted) {
-      box.style.display = '';
-      box.innerHTML = `
-        <hr class="section-divider">
-        <div class="section-title"><span class="material-icons-round">speed</span> Core Web Vitals</div>
-        <div class="cwv-card"><div class="cwv-unavailable">
-          <span class="material-icons-round">info</span>
-          Google PageSpeed couldn't measure this URL in time — usually a very slow or heavily client-rendered page (which is itself a finding). Try again, or check it directly at <a href="https://pagespeed.web.dev/" target="_blank" rel="noopener">pagespeed.web.dev</a>.
-        </div></div>`;
-    } else {
-      box.style.display = 'none';
-    }
-    return;
-  }
-  box.style.display = '';
+function cwvCardHtml(cwv) {
   const f = cwv.field || {};
   const lab = cwv.lab || {};
   const fmtMs = v => (v == null ? '—' : (v / 1000).toFixed(2) + 's');
@@ -1554,7 +1538,7 @@ function renderCWV(cwv, attempted) {
   if (cwv.stale && cwv.measured_at) src += ' · last measured ' + timeAgo(cwv.measured_at);
   const perf = cwv.perf_score != null
     ? `<div class="cwv-perf"><div class="cwv-perf-score" style="color:${gradeColor(cwv.perf_score)}">${cwv.perf_score}</div><div class="cwv-perf-label">Lighthouse<br>Performance</div></div>` : '';
-  box.innerHTML = `
+  return `
     <hr class="section-divider">
     <div class="section-title"><span class="material-icons-round">speed</span> Core Web Vitals <span class="cwv-src">${escHtml(src)}</span></div>
     <div class="cwv-card">
@@ -1565,6 +1549,46 @@ function renderCWV(cwv, attempted) {
         ${metric('CLS <small>visual stability</small>', f.cls, lab.cls, 'cls')}
       </div>
     </div>`;
+}
+
+function cwvMeasuringHtml() {
+  return `
+    <hr class="section-divider">
+    <div class="section-title"><span class="material-icons-round">speed</span> Core Web Vitals</div>
+    <div class="cwv-card"><div class="cwv-unavailable">
+      <span class="material-icons-round spin">autorenew</span>
+      Measuring performance with Google Lighthouse… this can take up to a minute for heavy pages.
+    </div></div>`;
+}
+
+function cwvNoteHtml() {
+  return `
+    <hr class="section-divider">
+    <div class="section-title"><span class="material-icons-round">speed</span> Core Web Vitals</div>
+    <div class="cwv-card"><div class="cwv-unavailable">
+      <span class="material-icons-round">info</span>
+      Google PageSpeed couldn't measure this URL — usually a page that is very slow or blocks automated testing (itself a finding). Check it directly at <a href="https://pagespeed.web.dev/" target="_blank" rel="noopener">pagespeed.web.dev</a>.
+    </div></div>`;
+}
+
+let _cwvReqId = 0;
+function renderCWV(cwv, attempted, url, mode) {
+  const box = $('cwv-section');
+  const hasData = cwv && (cwv.perf_score != null || cwv.has_field);
+  if (hasData) { box.style.display = ''; box.innerHTML = cwvCardHtml(cwv); return; }
+  if (!attempted) { box.style.display = 'none'; return; }
+  // Grade didn't capture CWV in time — fetch it off the critical path.
+  box.style.display = '';
+  box.innerHTML = cwvMeasuringHtml();
+  const myId = ++_cwvReqId;
+  fetch('/api/cwv?url=' + encodeURIComponent(url) + '&mode=' + encodeURIComponent(mode))
+    .then(r => r.json())
+    .then(j => {
+      if (myId !== _cwvReqId) return; // a newer grade superseded this
+      const c = j && j.core_web_vitals;
+      box.innerHTML = (c && (c.perf_score != null || c.has_field)) ? cwvCardHtml(c) : cwvNoteHtml();
+    })
+    .catch(() => { if (myId === _cwvReqId) box.innerHTML = cwvNoteHtml(); });
 }
 
 function renderComparison(comp, pillars) {

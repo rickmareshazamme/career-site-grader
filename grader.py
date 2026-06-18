@@ -35,6 +35,10 @@ class CareerSiteGrader:
         self.pagespeed: Optional[Dict] = None
         self.cwv_attempted = False
         self._psi_task = None
+        # In-grade PSI is a single quick attempt to keep grades fast; heavy sites
+        # that miss this are filled in asynchronously by the /api/cwv endpoint,
+        # which uses the longer timeouts below.
+        self.psi_timeouts = (38,)
         self.soup: Optional[BeautifulSoup] = None
         self.html = ''
         self.response_time = 0.0
@@ -302,8 +306,8 @@ class CareerSiteGrader:
         params = [('url', self.url), ('strategy', 'mobile'), ('category', 'performance')]
         if self.psi_key:
             params.append(('key', self.psi_key))
-        # Lighthouse run time varies; one retry catches transient timeouts.
-        for attempt_timeout in (45, 35):
+        # Lighthouse run time varies; retry per configured timeouts.
+        for attempt_timeout in self.psi_timeouts:
             try:
                 timeout = aiohttp.ClientTimeout(total=attempt_timeout)
                 async with aiohttp.ClientSession(timeout=timeout) as sess:

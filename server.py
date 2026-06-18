@@ -203,6 +203,43 @@ def api_history():
     return jsonify({'domain': domain, 'mode': mode, 'history': db.history(domain, mode)})
 
 
+@app.route('/api/cwv')
+def api_cwv():
+    """Fetch Core Web Vitals for a URL off the critical path — a generous,
+    retrying PageSpeed run for heavy sites. Returns cached data if the fresh run
+    can't complete. The front-end calls this when the grade itself didn't capture
+    CWV in time, so the report renders instantly and CWV fills in after."""
+    url = (request.args.get('url') or '').strip()
+    mode = (request.args.get('mode') or 'recruitment').strip()
+    if not url:
+        return jsonify({'error': 'url required'}), 400
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    async def run():
+        g = CareerSiteGrader(url, mode=mode)
+        g.psi_timeouts = (75, 55)  # generous off-path budget
+        await g._fetch_pagespeed()
+        return g.pagespeed
+
+    try:
+        cwv = loop.run_until_complete(run())
+    except Exception:
+        cwv = None
+    finally:
+        loop.close()
+
+    if cwv and cwv.get('perf_score') is not None:
+        db.save_cwv(url, mode, cwv)
+        resp = jsonify({'core_web_vitals': cwv})
+    else:
+        cached = db.get_cwv(url, mode)
+        resp = jsonify({'core_web_vitals': cached})  # may be null
+    resp.headers['Access-Control-Allow-Origin'] = '*'
+    return resp
+
+
 @app.route('/api/grade')
 def api_grade():
     """Non-streaming JSON grade — for the Client Portal and integrations."""
