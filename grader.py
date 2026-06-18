@@ -38,6 +38,14 @@ class CareerSiteGrader:
         self.has_sitemap = False
         self.sitemap_url: Optional[str] = None
         self.errors: List[str] = []
+        # Multi-page evidence (recruitment/career modes fetch /job-results, /job-detail, ...)
+        self.extra_html: Dict[str, str] = {}
+        self.extra_soups: Dict[str, BeautifulSoup] = {}
+        self.job_routes_found: List[str] = []
+        # Parsed JSON-LD cache
+        self._schema_objects: Optional[List[dict]] = None
+        self._schema_parse_errors = 0
+        self._rec_signals: Optional[Dict] = None
 
     def _normalize_url(self, url: str) -> str:
         url = url.strip()
@@ -68,6 +76,10 @@ class CareerSiteGrader:
         secondary_fetches = [self._fetch_robots_txt(), self._check_llms_txt(), self._check_llm_info()]
         if self.mode == 'general':
             secondary_fetches.append(self._check_sitemap())
+        else:
+            # Recruitment / career sites render apply + search client-side on
+            # dedicated routes — fetch them so detection isn't a false negative.
+            secondary_fetches.append(self._fetch_recruitment_pages())
         await asyncio.gather(*secondary_fetches)
 
         if self.mode == 'recruitment':
@@ -228,9 +240,50 @@ class CareerSiteGrader:
         except Exception:
             pass
 
+    async def _fetch_recruitment_pages(self):
+        """Fetch the dedicated job routes that Shazamme/recruitment sites use so
+        that Apply-flow and Job-search detection isn't a false negative when the
+        homepage doesn't carry those widgets."""
+        paths = ['/job-results', '/job-detail', '/jobs', '/search-jobs',
+                 '/job-search', '/vacancies', '/careers', '/find-a-job']
+        try:
+            ssl_ctx = ssl.create_default_context()
+            ssl_ctx.check_hostname = False
+            ssl_ctx.verify_mode = ssl.CERT_NONE
+            connector = aiohttp.TCPConnector(ssl=ssl_ctx, limit=8)
+            timeout = aiohttp.ClientTimeout(total=12, sock_read=8)
+
+            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as sess:
+                async def fetch_one(path):
+                    url = urljoin(self.base_url, path)
+                    try:
+                        async with sess.get(url, headers=self.HEADERS, allow_redirects=True) as resp:
+                            if resp.status == 200:
+                                html = await resp.text(encoding='utf-8', errors='replace')
+                                if len(html) > 500:
+                                    self.extra_html[path] = html
+                                    self.extra_soups[path] = BeautifulSoup(html, 'html.parser')
+                                    self.job_routes_found.append(path)
+                    except Exception:
+                        pass
+                await asyncio.gather(*[fetch_one(p) for p in paths])
+        except Exception:
+            pass
+
     # -------------------------------------------------------------------------
     # Helpers
     # -------------------------------------------------------------------------
+
+    def _all_soups(self) -> List[BeautifulSoup]:
+        soups = [self.soup] if self.soup else []
+        soups.extend(self.extra_soups.values())
+        return soups
+
+    def _combined_html(self) -> str:
+        return ' '.join([self.html] + list(self.extra_html.values())).lower()
+
+    def _combined_text(self) -> str:
+        return ' '.join(s.get_text(' ') for s in self._all_soups()).lower()
 
     def _score_to_grade(self, score: float) -> str:
         if score >= 93: return 'A+'
@@ -261,31 +314,142 @@ class CareerSiteGrader:
             return 'warn'
         return 'fail'
 
-    def _get_schema_types(self) -> List[str]:
-        if not self.soup:
-            return []
-        types: List[str] = []
-        for script in self.soup.find_all('script', type='application/ld+json'):
-            try:
-                raw = script.string or ''
-                data = json.loads(raw)
-                self._extract_types(data, types)
-            except Exception:
-                pass
-        return types
+    def _get_schema_objects(self) -> List[dict]:
+        """Parse every JSON-LD block across all fetched pages into a flat list of
+        typed nodes (recursing @graph and nested objects). Malformed blocks are
+        counted in self._schema_parse_errors."""
+        if self._schema_objects is not None:
+            return self._schema_objects
+        objs: List[dict] = []
+        for soup in self._all_soups():
+            for script in soup.find_all('script', type='application/ld+json'):
+                raw = (script.string or script.get_text() or '').strip()
+                if not raw:
+                    continue
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    self._schema_parse_errors += 1
+                    continue
+                self._flatten_nodes(data, objs)
+        self._schema_objects = objs
+        return objs
 
-    def _extract_types(self, data, types: List[str]):
+    def _flatten_nodes(self, data, out: List[dict]):
         if isinstance(data, dict):
-            t = data.get('@type', '')
-            if isinstance(t, list):
-                types.extend(t)
-            elif t:
-                types.append(t)
-            for item in data.get('@graph', []):
-                self._extract_types(item, types)
+            if data.get('@type'):
+                out.append(data)
+            for v in data.values():
+                if isinstance(v, (dict, list)):
+                    self._flatten_nodes(v, out)
         elif isinstance(data, list):
             for item in data:
-                self._extract_types(item, types)
+                self._flatten_nodes(item, out)
+
+    def _get_schema_types(self) -> List[str]:
+        types: List[str] = []
+        for node in self._get_schema_objects():
+            t = node.get('@type', '')
+            if isinstance(t, list):
+                types.extend(str(x) for x in t)
+            elif t:
+                types.append(str(t))
+        return types
+
+    def _find_schema_node(self, *type_names) -> Optional[dict]:
+        wanted = {t.lower() for t in type_names}
+        for node in self._get_schema_objects():
+            t = node.get('@type', '')
+            tl = {t.lower()} if isinstance(t, str) else {str(x).lower() for x in t}
+            if wanted & tl:
+                return node
+        return None
+
+    JOBPOSTING_REQUIRED = ['title', 'datePosted', 'hiringOrganization', 'jobLocation', 'description']
+    JOBPOSTING_RICH = ['validThrough', 'employmentType', 'baseSalary',
+                       'jobLocationType', 'applicantLocationRequirements', 'directApply']
+
+    def _validate_jobposting(self) -> Optional[Dict]:
+        node = self._find_schema_node('JobPosting')
+        if not node:
+            return None
+        empty = (None, '', [], {})
+        present_req = [f for f in self.JOBPOSTING_REQUIRED if node.get(f) not in empty]
+        present_rich = [f for f in self.JOBPOSTING_RICH if node.get(f) not in empty]
+        missing_req = [f for f in self.JOBPOSTING_REQUIRED if f not in present_req]
+        return {'present_req': present_req, 'missing_req': missing_req, 'present_rich': present_rich}
+
+    def _has_search_action(self) -> bool:
+        site = self._find_schema_node('WebSite')
+        if not site:
+            return False
+        pa = site.get('potentialAction')
+        if not pa:
+            return False
+        nodes = pa if isinstance(pa, list) else [pa]
+        return any(isinstance(n, dict) and 'SearchAction' in str(n.get('@type', '')) for n in nodes)
+
+    def _recruitment_signals(self) -> Dict:
+        """Apply-flow / job-search evidence aggregated across the homepage and the
+        dedicated job routes, with platform/widget fallback so client-rendered
+        Shazamme/Duda job boards aren't scored as missing."""
+        if self._rec_signals is not None:
+            return self._rec_signals
+
+        soups = self._all_soups()
+        combined_text = self._combined_text()
+        combined_html = self._combined_html()
+
+        apply_btns, apply_links, filter_els = [], [], []
+        search_box = None
+        search_form = None
+        field_inputs = []
+        for s in soups:
+            apply_btns += s.find_all(
+                lambda t: t.name in ('a', 'button') and re.search(r'\bapply\b', t.get_text(' '), re.I))
+            apply_links += s.find_all('a', href=re.compile(r'apply', re.I))
+            filter_els += s.find_all(class_=re.compile(r'filter|facet|refine', re.I))
+            field_inputs += s.find_all(['input', 'select', 'textarea'])
+            if search_box is None:
+                search_box = (s.find('input', attrs={'type': 'search'}) or
+                              s.find('input', placeholder=re.compile(r'search|job|role|keyword', re.I)) or
+                              s.find('input', id=re.compile(r'search|job', re.I)) or
+                              s.find('input', attrs={'name': re.compile(r'search|keyword|job', re.I)}))
+            if search_form is None:
+                search_form = (s.find('form', id=re.compile(r'search', re.I)) or
+                               s.find('form', class_=re.compile(r'search|job-search', re.I)))
+
+        # Platform / job-widget detection (client-rendered boards)
+        is_duda = bool(re.search(r'cdn-website\.com|dudaone|window\.parameters|irp\.cdn-website', combined_html))
+        is_shazamme = bool(re.search(r'shazamme', combined_html))
+        job_widget = bool(re.search(
+            r'job-?board|jobboard|dmrespcol|dmcollection|data-collection|dynamic.?page.?item|collectionlist',
+            combined_html)) and ('job' in combined_text)
+
+        platform = 'Shazamme' if is_shazamme else ('Duda' if is_duda else None)
+        widget_present = bool(job_widget or (platform and self.job_routes_found))
+
+        visible_fields = len([
+            f for f in field_inputs
+            if f.get('type', 'text') not in ('hidden', 'submit', 'button', 'reset', 'image')
+        ])
+
+        has_apply = bool(apply_btns or apply_links) or widget_present
+        has_search = (bool(search_box or search_form) or
+                      'job search' in combined_text or 'search jobs' in combined_text or
+                      widget_present)
+
+        self._rec_signals = {
+            'apply_count': len(apply_btns) + len(apply_links),
+            'has_apply': has_apply,
+            'has_search': has_search,
+            'filter_count': len(filter_els),
+            'field_count': visible_fields,
+            'platform': platform,
+            'widget_present': widget_present,
+            'job_routes': list(self.job_routes_found),
+        }
+        return self._rec_signals
 
     # -------------------------------------------------------------------------
     # Pillar: SEO & Discoverability
@@ -476,6 +640,39 @@ class CareerSiteGrader:
                         'status': self._pts_status(pts, heading_max), 'detail': note})
         score += pts; max_score += heading_max
 
+        # --- Structured-data validity (recruitment & career) ---
+        if self.mode in ('recruitment', 'career_site'):
+            jp = self._validate_jobposting()
+            sig = self._recruitment_signals()
+            v_max = 12; v_pts = 0; v_notes = []
+            if jp is None:
+                if sig['widget_present']:
+                    v_pts += 5
+                    v_notes.append('JobPosting likely rendered client-side by the job widget — '
+                                   'confirm it is in the crawlable DOM for Google Jobs')
+                else:
+                    v_notes.append('No JobPosting schema on scanned pages — required for Google Jobs')
+            else:
+                req_ratio = len(jp['present_req']) / len(self.JOBPOSTING_REQUIRED)
+                v_pts += round(8 * req_ratio)
+                if jp['missing_req']:
+                    v_notes.append(f"JobPosting missing required: {', '.join(jp['missing_req'])}")
+                else:
+                    v_notes.append('JobPosting has all required fields ✓ (Google Jobs eligible)')
+                if jp['present_rich']:
+                    v_pts += min(len(jp['present_rich']), 2)
+                    v_notes.append(f"Rich fields: {', '.join(jp['present_rich'][:4])} ✓")
+            if self._has_search_action():
+                v_pts += 2; v_notes.append('WebSite SearchAction (sitelinks search box) ✓')
+            else:
+                v_notes.append('No WebSite SearchAction — add for a sitelinks search box')
+            if self._schema_parse_errors:
+                v_notes.append(f'{self._schema_parse_errors} malformed JSON-LD block(s) — fix to be machine-readable')
+            v_pts = min(v_pts, v_max)
+            checks.append({'name': 'Structured Data Validity', 'weight': v_max, 'score': v_pts, 'max': v_max,
+                            'status': self._pts_status(v_pts, v_max), 'detail': ' | '.join(v_notes)})
+            score += v_pts; max_score += v_max
+
         # --- Mode-specific extras ---
         if self.mode == 'recruitment':
             sector_check = self._check_sector_pages(soup)
@@ -650,37 +847,66 @@ class CareerSiteGrader:
         score = 0
         max_score = 0
 
-        # --- AI Crawler Access ---
-        gpt_blocked = False
-        claude_blocked = False
-        current_agent = None
+        # --- AI Crawler Access (full 2026 bot matrix) ---
+        # group -> the user-agent tokens that represent it in robots.txt
+        AI_BOTS = {
+            'ChatGPT (GPTBot)':        ['gptbot'],
+            'ChatGPT Search':          ['oai-searchbot', 'chatgpt-user'],
+            'Claude (ClaudeBot)':      ['claudebot', 'anthropic-ai', 'claude-web', 'claude-searchbot'],
+            'Google AI (Gemini/AIO)':  ['google-extended'],
+            'Perplexity':              ['perplexitybot', 'perplexity-user'],
+            'Apple Intelligence':      ['applebot-extended'],
+            'Amazon (Alexa/Rufus)':    ['amazonbot'],
+            'Meta AI':                 ['meta-externalagent', 'facebookbot'],
+            'Common Crawl (CCBot)':    ['ccbot'],
+            'ByteDance (Bytespider)':  ['bytespider'],
+            'Cohere':                  ['cohere-ai'],
+        }
+        blocked_groups = []
         if self.robots_txt:
+            # Map each user-agent token to whether it is fully disallowed
+            disallow_all_agents = set()
+            current_agents: List[str] = []
             for line in self.robots_txt.lower().splitlines():
                 line = line.strip()
                 if line.startswith('user-agent:'):
-                    current_agent = line.split(':', 1)[1].strip()
-                elif line.startswith('disallow:') and line.split(':', 1)[1].strip() in ('/', '/*'):
-                    if current_agent in ('gptbot', 'chatgpt-user', 'openai'):
-                        gpt_blocked = True
-                    if current_agent in ('claudebot', 'anthropic-ai', 'claude-web'):
-                        claude_blocked = True
+                    current_agents.append(line.split(':', 1)[1].strip())
+                elif line.startswith('disallow:'):
+                    val = line.split(':', 1)[1].strip()
+                    if val in ('/', '/*'):
+                        for a in current_agents:
+                            disallow_all_agents.add(a)
+                    current_agents = []  # reset group after directives
+                elif line.startswith('allow:'):
+                    current_agents = current_agents
+                elif line == '':
+                    current_agents = []
+            for group, tokens in AI_BOTS.items():
+                if any(tok in disallow_all_agents for tok in tokens):
+                    blocked_groups.append(group)
 
-        ai_pts = 0; ai_notes = []
+        ai_max = 20
+        ai_notes = []
         if self.robots_txt:
-            ai_pts += 5; ai_notes.append('robots.txt found ✓')
+            ai_notes.append('robots.txt found ✓')
+            sitemap_directive = 'sitemap:' in self.robots_txt.lower()
+            if sitemap_directive:
+                ai_notes.append('Sitemap directive ✓')
+            total = len(AI_BOTS)
+            allowed = total - len(blocked_groups)
+            ai_pts = round(ai_max * (allowed / total))
+            if blocked_groups:
+                ai_notes.append(f'BLOCKED for: {", ".join(blocked_groups[:5])}')
+            else:
+                ai_notes.append(f'All {total} major AI crawlers allowed ✓')
         else:
-            ai_notes.append('No robots.txt found')
-        if not gpt_blocked:
-            ai_pts += 8; ai_notes.append('GPTBot can crawl ✓')
-        else:
-            ai_notes.append('GPTBot BLOCKED — invisible to ChatGPT browsing & indexing')
-        if not claude_blocked:
-            ai_pts += 7; ai_notes.append('ClaudeBot can crawl ✓')
-        else:
-            ai_notes.append('ClaudeBot BLOCKED')
-        checks.append({'name': 'AI Crawler Access', 'weight': 20, 'score': ai_pts, 'max': 20,
-                        'status': self._pts_status(ai_pts, 20), 'detail': ' | '.join(ai_notes)})
-        score += ai_pts; max_score += 20
+            # No robots.txt = nothing is blocked (default-allow) but no signalling
+            ai_pts = round(ai_max * 0.8)
+            ai_notes.append('No robots.txt — AI crawlers default-allowed but you give them no guidance')
+        checks.append({'name': 'AI Crawler Access', 'weight': ai_max, 'score': ai_pts, 'max': ai_max,
+                        'status': self._pts_status(ai_pts, ai_max), 'detail': ' | '.join(ai_notes),
+                        'value': f'{len(AI_BOTS) - len(blocked_groups)}/{len(AI_BOTS)} AI crawlers allowed'})
+        score += ai_pts; max_score += ai_max
 
         # --- llms.txt ---
         if self.has_llms_txt:
@@ -745,24 +971,68 @@ class CareerSiteGrader:
         score += struct_pts; max_score += 15
 
         # --- Entity & Authority Signals ---
-        has_org  = any(t in ['Organization', 'Corporation', 'EmploymentAgency',
-                              'StaffingAgency', 'RecruitmentAgency'] for t in schema_types)
-        has_contact = 'ContactPoint' in schema_types
-        has_person  = 'Person' in schema_types
+        ent_max = 20
+        org_node = self._find_schema_node(
+            'Organization', 'Corporation', 'EmploymentAgency',
+            'StaffingAgency', 'RecruitmentAgency', 'LocalBusiness')
+        has_contact = bool(self._find_schema_node('ContactPoint')) or \
+            (org_node is not None and 'contactPoint' in org_node)
+        has_person = bool(self._find_schema_node('Person'))
+
+        # sameAs — the single strongest entity-disambiguation signal for AI
+        same_as = []
+        if org_node:
+            sa = org_node.get('sameAs')
+            if isinstance(sa, str):
+                same_as = [sa]
+            elif isinstance(sa, list):
+                same_as = [str(x) for x in sa]
+        AUTHORITY_HOSTS = ('wikipedia.org', 'wikidata.org', 'crunchbase.com', 'linkedin.com',
+                           'glassdoor', 'bloomberg.com', 'opencorporates.com')
+        authority_refs = [u for u in same_as if any(h in u.lower() for h in AUTHORITY_HOSTS)]
+
+        # NAP: address + phone presence in schema or visible text
+        page_text = soup.get_text(' ')
+        has_address = bool(org_node and org_node.get('address')) or \
+            bool(re.search(r'\b\d{1,5}\s+\w+(\s\w+){0,3}\s+(street|st|road|rd|avenue|ave|lane|ln|drive|dr|suite|level|floor)\b', page_text, re.I))
+        has_phone = bool(org_node and org_node.get('telephone')) or \
+            bool(re.search(r'(\+?\d[\d\s().-]{7,}\d)', page_text))
+
+        # About / Team pages (E-E-A-T people)
+        about_link = soup.find('a', href=re.compile(r'about|who.?we.?are|our.?story|our.?team|meet.?the.?team|leadership|people', re.I))
+
+        # Accreditation / professional bodies (recruitment authority)
+        accreditation = bool(re.search(
+            r'\brec\b|\bapsco\b|\bsia\b|\bcipd\b|iso\s?\d{4,5}|accredit|certified|chartered|member of',
+            page_text, re.I))
+
         ent_pts = 0; ent_notes = []
-        if has_org:
-            ent_pts += 10; ent_notes.append('Organization entity defined ✓')
+        if org_node:
+            ent_pts += 6; ent_notes.append('Organization entity ✓')
         else:
-            ent_notes.append('No Organization entity — AI cannot reliably identify your brand')
-        if has_contact:
-            ent_pts += 5; ent_notes.append('ContactPoint in schema ✓')
-        if has_person:
-            ent_pts += 5; ent_notes.append('Person entities defined ✓')
-        ent_pts = min(ent_pts, 20)
-        checks.append({'name': 'Entity & Authority', 'weight': 20, 'score': ent_pts, 'max': 20,
-                        'status': self._pts_status(ent_pts, 20),
-                        'detail': ' | '.join(ent_notes) if ent_notes else 'No entity signals detected'})
-        score += ent_pts; max_score += 20
+            ent_notes.append('No Organization schema — AI cannot reliably identify your brand')
+        if authority_refs:
+            ent_pts += 6; ent_notes.append(f'sameAs → authority profiles ✓ ({len(authority_refs)})')
+        elif same_as:
+            ent_pts += 3; ent_notes.append('sameAs present (add Wikidata/Crunchbase/LinkedIn)')
+        else:
+            ent_notes.append('No sameAs links — add Wikidata/LinkedIn/Crunchbase to enter the Knowledge Graph')
+        if has_contact or (has_address and has_phone):
+            ent_pts += 3; ent_notes.append('NAP / contact details ✓')
+        else:
+            ent_notes.append('Incomplete NAP (name/address/phone)')
+        if has_person or about_link:
+            ent_pts += 3; ent_notes.append('People / about-team signals ✓')
+        else:
+            ent_notes.append('No named people / about page — weak E-E-A-T')
+        if accreditation:
+            ent_pts += 2; ent_notes.append('Accreditation / credentials ✓')
+        ent_pts = min(ent_pts, ent_max)
+        checks.append({'name': 'Entity & Authority', 'weight': ent_max, 'score': ent_pts, 'max': ent_max,
+                        'status': self._pts_status(ent_pts, ent_max),
+                        'detail': ' | '.join(ent_notes) if ent_notes else 'No entity signals detected',
+                        'value': (', '.join(authority_refs[:3]) if authority_refs else None)})
+        score += ent_pts; max_score += ent_max
 
         # --- Content Depth ---
         word_count = len(re.findall(r'\w+', soup.get_text()))
@@ -777,6 +1047,85 @@ class CareerSiteGrader:
         checks.append({'name': 'Content Depth', 'weight': 15, 'score': depth_pts, 'max': 15,
                         'status': self._pts_status(depth_pts, 15), 'detail': depth_note})
         score += depth_pts; max_score += 15
+
+        # --- AEO / Answer-Engine Readiness ---
+        # The content shape AI engines quote from: summary blocks, question
+        # headings, direct answers, tables, quotable stats, freshness.
+        aeo_max = 20
+        headings = soup.find_all(['h2', 'h3'])
+        heading_txts = [h.get_text(' ').strip() for h in headings]
+        QUESTION_RE = re.compile(r'\?|\b(how|what|why|when|where|which|who|can|should|is|are|do|does|best)\b', re.I)
+        q_headings = [t for t in heading_txts if QUESTION_RE.search(t)]
+        has_tldr = bool(re.search(
+            r'tl;?dr|key takeaway|in summary|at a glance|quick answer|the short answer|summary\s*[:—-]',
+            page_text_body := soup.get_text(' '), re.I))
+        tables = soup.find_all('table')
+        stat_hits = re.findall(r'\b\d{1,3}(?:\.\d+)?\s?%|\b(?:£|\$|€)\s?\d', page_text_body)
+        has_freshness = bool(re.search(r'last updated|updated on|reviewed on|published on|posted on', page_text_body, re.I)) \
+            or bool(self._find_schema_node('Article', 'BlogPosting') and
+                    any(self._find_schema_node('Article', 'BlogPosting').get(k) for k in ('dateModified', 'datePublished')))
+
+        aeo_pts = 0; aeo_notes = []
+        if has_tldr:
+            aeo_pts += 5; aeo_notes.append('Summary / TL;DR block ✓ — directly quotable by AI')
+        else:
+            aeo_notes.append('No summary/TL;DR block — add an extractable answer near the top')
+        if len(q_headings) >= 3:
+            aeo_pts += 6; aeo_notes.append(f'{len(q_headings)} question-style headings ✓')
+        elif q_headings:
+            aeo_pts += 3; aeo_notes.append(f'{len(q_headings)} question-style heading(s) — add more')
+        else:
+            aeo_notes.append('No question-style headings — match how people ask AI')
+        if tables:
+            aeo_pts += 4; aeo_notes.append(f'{len(tables)} table(s) — highly extractable ✓')
+        if len(stat_hits) >= 3:
+            aeo_pts += 3; aeo_notes.append(f'{len(stat_hits)} quotable stats/figures ✓')
+        else:
+            aeo_notes.append('Few concrete stats/figures — AI prefers citable numbers')
+        if has_freshness:
+            aeo_pts += 2; aeo_notes.append('Freshness signal (last updated / dateModified) ✓')
+        else:
+            aeo_notes.append('No visible freshness signal — AI favours up-to-date content')
+        aeo_pts = min(aeo_pts, aeo_max)
+        checks.append({'name': 'AEO / Answer-Engine Readiness', 'weight': aeo_max, 'score': aeo_pts, 'max': aeo_max,
+                        'status': self._pts_status(aeo_pts, aeo_max), 'detail': ' | '.join(aeo_notes)})
+        score += aeo_pts; max_score += aeo_max
+
+        # --- Crawlable Content (JS-rendering) ---
+        # AI crawlers mostly do NOT execute JS. If the primary content only
+        # exists after client-side rendering, the page is invisible to them.
+        crawl_max = 15
+        visible_text = soup.get_text(' ', strip=True)
+        text_len = len(visible_text)
+        html_len = max(len(self.html), 1)
+        text_ratio = text_len / html_len
+        scripts = soup.find_all('script')
+        script_bytes = sum(len(s.get_text() or '') for s in scripts)
+        noscript = soup.find('noscript')
+        empty_spa_root = bool(soup.find(id=re.compile(r'^(root|app|__next)$')) and text_len < 600)
+        is_duda_spa = bool(re.search(r'cdn-website\.com|window\.parameters', self.html.lower()))
+
+        crawl_pts = 0; crawl_notes = []
+        if text_len >= 1500 and text_ratio >= 0.05:
+            crawl_pts += 11; crawl_notes.append(f'{text_len:,} chars of crawlable text ✓')
+        elif text_len >= 600:
+            crawl_pts += 7; crawl_notes.append(f'{text_len:,} chars of static text — adequate')
+        else:
+            crawl_notes.append(f'Only {text_len:,} chars of static text — content may be JS-rendered & invisible to AI crawlers')
+        if empty_spa_root:
+            crawl_notes.append('Empty SPA root in HTML — server-render or pre-render for AI crawlers')
+        if noscript and (noscript.get_text() or '').strip():
+            crawl_pts += 4; crawl_notes.append('noscript fallback ✓')
+        elif text_len < 1500:
+            crawl_notes.append('No noscript fallback for JS-only content')
+        else:
+            crawl_pts += 4
+        if is_duda_spa and text_len < 1500:
+            crawl_notes.append('Duda widget content is client-rendered — ensure a static/pre-rendered snapshot exists')
+        crawl_pts = min(crawl_pts, crawl_max)
+        checks.append({'name': 'Crawlable Content (JS-render)', 'weight': crawl_max, 'score': crawl_pts, 'max': crawl_max,
+                        'status': self._pts_status(crawl_pts, crawl_max), 'detail': ' | '.join(crawl_notes)})
+        score += crawl_pts; max_score += crawl_max
 
         pct = round(score / max_score * 100) if max_score else 0
         return {
@@ -847,44 +1196,34 @@ class CareerSiteGrader:
             score += a11y_pts; max_score += 15
 
             # --- Apply Flow (20pts max) ---
-            apply_btns = soup.find_all(
-                lambda t: t.name in ['a', 'button'] and
-                re.search(r'\bapply\b', t.get_text(), re.I)
-            )
-            page_text_lower = soup.get_text().lower()
-            search_box = (soup.find('input', attrs={'type': 'search'}) or
-                          soup.find('input', placeholder=re.compile(r'search|job|role|keyword', re.I)) or
-                          soup.find('input', id=re.compile(r'search|job', re.I)))
-            search_form = (soup.find('form', id=re.compile(r'search', re.I)) or
-                           soup.find('form', class_=re.compile(r'search|job-search', re.I)))
-            has_job_search = bool(search_box or search_form or 'job search' in page_text_lower)
-
-            # Count visible form fields (inputs/selects/textareas) in all forms
-            all_field_inputs = soup.find_all(['input', 'select', 'textarea'])
-            field_count = len([
-                f for f in all_field_inputs
-                if f.get('type', 'text') not in ('hidden', 'submit', 'button', 'reset', 'image')
-            ])
-
+            sig = self._recruitment_signals()
+            field_count = sig['field_count']
             apply_pts = 0; apply_notes = []
-            if len(apply_btns) >= 2:
-                apply_pts += 10; apply_notes.append(f'{len(apply_btns)} Apply buttons ✓')
-            elif apply_btns:
-                apply_pts += 6; apply_notes.append(f'{len(apply_btns)} Apply button found')
+            if sig['apply_count'] >= 2:
+                apply_pts += 10; apply_notes.append(f"{sig['apply_count']} Apply buttons ✓")
+            elif sig['apply_count'] == 1:
+                apply_pts += 6; apply_notes.append('1 Apply button found')
+            elif sig['widget_present']:
+                apply_pts += 10; apply_notes.append(f"Apply flow via {sig['platform'] or 'job'} widget ✓ (client-rendered)")
             else:
                 apply_notes.append('No Apply button detected — how do candidates apply?')
 
-            if field_count <= 5:
+            if field_count == 0 and sig['widget_present']:
+                apply_pts += 5; apply_notes.append('Apply form rendered by widget')
+            elif field_count <= 5:
                 apply_pts += 5; apply_notes.append(f'{field_count} form fields — streamlined ✓')
             elif field_count <= 10:
                 apply_pts += 3; apply_notes.append(f'{field_count} form fields — acceptable')
-            elif field_count > 10:
+            else:
                 apply_notes.append(f'{field_count} form fields — too many, simplify the apply flow')
 
-            if has_job_search:
-                apply_pts += 5; apply_notes.append('Job search detected ✓')
+            if sig['has_search']:
+                apply_pts += 5
+                apply_notes.append('Job search via widget ✓' if sig['widget_present'] else 'Job search detected ✓')
             else:
                 apply_notes.append('No job search — candidates cannot find relevant roles')
+            if sig['job_routes']:
+                apply_notes.append(f"Job routes live: {', '.join(sig['job_routes'][:3])}")
 
             apply_pts = min(apply_pts, 20)
             checks.append({'name': 'Apply Flow & Job Search', 'weight': 20, 'score': apply_pts, 'max': 20,
@@ -992,30 +1331,25 @@ class CareerSiteGrader:
                             'status': self._pts_status(a11y_pts, 15), 'detail': f'{lang_note} | {alt_note}'})
             score += a11y_pts; max_score += 15
 
-            # --- Apply & Job Search ---
-            apply_btns = soup.find_all(
-                lambda t: t.name in ['a', 'button'] and
-                re.search(r'\bapply\b', t.get_text(), re.I)
-            )
-            page_text_lower = soup.get_text().lower()
-            search_box = (soup.find('input', attrs={'type': 'search'}) or
-                          soup.find('input', placeholder=re.compile(r'search|job|role|keyword', re.I)) or
-                          soup.find('input', id=re.compile(r'search|job', re.I)))
-            search_form = (soup.find('form', id=re.compile(r'search', re.I)) or
-                           soup.find('form', class_=re.compile(r'search|job-search', re.I)))
-            has_job_search = bool(search_box or search_form or 'job search' in page_text_lower)
-
+            # --- Apply & Job Search (multi-page + widget-aware) ---
+            sig = self._recruitment_signals()
             apply_pts = 0; apply_notes = []
-            if len(apply_btns) >= 2:
-                apply_pts += 15; apply_notes.append(f'{len(apply_btns)} Apply buttons ✓')
-            elif apply_btns:
-                apply_pts += 10; apply_notes.append(f'{len(apply_btns)} Apply button found')
+            if sig['apply_count'] >= 2:
+                apply_pts += 15; apply_notes.append(f"{sig['apply_count']} Apply buttons ✓")
+            elif sig['apply_count'] == 1:
+                apply_pts += 10; apply_notes.append('1 Apply button found')
+            elif sig['widget_present']:
+                apply_pts += 13; apply_notes.append(f"Apply flow via {sig['platform'] or 'job'} widget ✓ (client-rendered)")
             else:
                 apply_notes.append('No Apply button detected — how do candidates apply?')
-            if has_job_search:
-                apply_pts += 10; apply_notes.append('Job search detected ✓')
+            if sig['has_search']:
+                apply_pts += 10
+                apply_notes.append('Job search via widget ✓' if sig['widget_present'] else 'Job search detected ✓')
             else:
                 apply_notes.append('No job search — candidates cannot find relevant roles')
+            if sig['job_routes']:
+                apply_notes.append(f"Job routes live: {', '.join(sig['job_routes'][:3])}")
+            apply_pts = min(apply_pts, 25)
             checks.append({'name': 'Apply Flow & Job Search', 'weight': 25, 'score': apply_pts, 'max': 25,
                             'status': self._pts_status(apply_pts, 25), 'detail': ' | '.join(apply_notes)})
             score += apply_pts; max_score += 25
@@ -1383,15 +1717,10 @@ class CareerSiteGrader:
                             'status': self._pts_status(soc_pts, 15), 'detail': soc_note})
             score += soc_pts; max_score += 15
 
-            # --- DE&I ---
-            dei_sig = bool(re.search(
-                r'\bdei\b|diversity|equity|inclusion|equal opportunit|eeo|belonging|erg\b', page_text, re.I))
-            dei_pts = 10 if dei_sig else 0
-            dei_note = 'DE&I commitment visible ✓' if dei_sig else \
-                       'No DE&I content — increasingly important for talent attraction'
-            checks.append({'name': 'DE&I Commitment', 'weight': 10, 'score': dei_pts, 'max': 10,
-                            'status': self._pts_status(dei_pts, 10), 'detail': dei_note})
-            score += dei_pts; max_score += 10
+            # NOTE: DE&I is intentionally NOT scored in recruitment (agency) mode —
+            # recruitment agency sites rarely surface DE&I content on the scanned
+            # page, so scoring it only produced unfair false-negative penalties.
+            # It remains scored in career_site mode where employers should have it.
 
         pct = round(score / max_score * 100) if max_score else 0
         return {
@@ -1987,18 +2316,17 @@ class CareerSiteGrader:
                             'status': self._pts_status(srch_pts, 15), 'detail': srch_note})
             score += srch_pts; max_score += 15
         else:
-            search_box = (soup.find('input', attrs={'type': 'search'}) or
-                          soup.find('input', placeholder=re.compile(r'search|job|role|keyword', re.I)) or
-                          soup.find('input', id=re.compile(r'search|job', re.I)))
-            search_form = soup.find('form', id=re.compile(r'search', re.I))
-            filter_els = soup.find_all(class_=re.compile(r'filter|facet|refine', re.I))
+            sig = self._recruitment_signals()
             srch_pts = 0; srch_notes = []
-            if search_box or search_form:
-                srch_pts += 15; srch_notes.append('Job search detected ✓')
+            if sig['has_search']:
+                srch_pts += 15
+                srch_notes.append('Job search via widget ✓' if sig['widget_present'] else 'Job search detected ✓')
             else:
                 srch_notes.append('No job search — candidates expect instant search')
-            if filter_els:
-                srch_pts += 5; srch_notes.append(f'{len(filter_els)} filter element(s) ✓')
+            if sig['filter_count']:
+                srch_pts += 5; srch_notes.append(f"{sig['filter_count']} filter element(s) ✓")
+            elif sig['widget_present']:
+                srch_pts += 5; srch_notes.append('Filters rendered by job widget ✓')
             srch_pts = min(srch_pts, 20)
             checks.append({'name': 'Job Search & Filters', 'weight': 20, 'score': srch_pts, 'max': 20,
                             'status': self._pts_status(srch_pts, 20), 'detail': ' | '.join(srch_notes)})
@@ -2081,10 +2409,13 @@ class CareerSiteGrader:
             'Call-to-Action Strength': 'Without clear CTAs candidates leave without converting',
             'DE&I Commitment': 'Growing factor in employer selection — affects talent pipeline diversity',
             'Content Depth': 'Thin pages rank poorly and give AI engines nothing to work with',
-            'Entity & Authority': 'Helps AI engines reliably identify and cite your brand',
+            'Entity & Authority': 'sameAs/Wikidata/LinkedIn links + NAP let AI engines reliably identify and cite your brand in the Knowledge Graph',
             'Industry & Sector Pages': 'Pages like "accounting jobs" and "IT recruitment" capture high-intent keyword searches — typically 60-80% of recruiter organic traffic',
             'Indexability': 'If noindex is set, your page will not appear in any search results',
             'Canonical URL': 'Prevents duplicate content from splitting your ranking signals',
+            'Structured Data Validity': 'Valid JobPosting fields are required for Google Jobs eligibility — invalid markup gets dropped',
+            'AEO / Answer-Engine Readiness': 'Summary blocks, question headings and quotable stats are what ChatGPT, Perplexity and AI Overviews actually cite',
+            'Crawlable Content (JS-render)': 'AI crawlers rarely run JavaScript — content that only renders client-side is invisible to them',
         }
 
         IMPACT_CAREER = {
@@ -2100,6 +2431,11 @@ class CareerSiteGrader:
             'Apply Flow & Job Search': 'Complex application forms cause 60% of candidates to abandon',
             'Video Content': 'Video on career sites increases application intent by 34%',
             'Live Chat & Chatbot': 'Chatbots reduce career site bounce by up to 40%',
+            'Entity & Authority': 'sameAs/Wikidata/LinkedIn links + named people let AI engines identify and trust your employer brand',
+            'Structured Data Validity': 'Valid JobPosting fields are required for Google Jobs eligibility',
+            'AEO / Answer-Engine Readiness': 'Summary blocks, question headings and quotable stats are what AI engines cite',
+            'Crawlable Content (JS-render)': 'AI crawlers rarely run JavaScript — client-rendered content is invisible to them',
+            'AI Crawler Access': 'Required for ChatGPT, Perplexity, Gemini and Claude to surface your roles',
         }
 
         IMPACT_GENERAL = {
