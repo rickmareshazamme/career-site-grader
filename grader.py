@@ -302,16 +302,22 @@ class CareerSiteGrader:
         params = [('url', self.url), ('strategy', 'mobile'), ('category', 'performance')]
         if self.psi_key:
             params.append(('key', self.psi_key))
-        try:
-            timeout = aiohttp.ClientTimeout(total=50)
-            async with aiohttp.ClientSession(timeout=timeout) as sess:
-                async with sess.get(endpoint, params=params) as resp:
-                    if resp.status != 200:
-                        return
-                    data = await resp.json()
-            self.pagespeed = self._parse_pagespeed(data)
-        except Exception:
-            self.pagespeed = None
+        # Lighthouse run time varies; one retry catches transient timeouts.
+        for attempt_timeout in (45, 35):
+            try:
+                timeout = aiohttp.ClientTimeout(total=attempt_timeout)
+                async with aiohttp.ClientSession(timeout=timeout) as sess:
+                    async with sess.get(endpoint, params=params) as resp:
+                        if resp.status != 200:
+                            continue
+                        data = await resp.json()
+                parsed = self._parse_pagespeed(data)
+                if parsed and parsed.get('perf_score') is not None:
+                    self.pagespeed = parsed
+                    return
+            except Exception:
+                continue
+        self.pagespeed = None
 
     def _parse_pagespeed(self, data: dict) -> Optional[Dict]:
         lr = data.get('lighthouseResult', {})

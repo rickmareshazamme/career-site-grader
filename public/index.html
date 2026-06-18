@@ -1483,6 +1483,13 @@ function downloadPDF() {
   window.print();
 }
 
+function timeAgo(epochSec) {
+  const s = Math.max(0, Date.now() / 1000 - epochSec);
+  if (s < 3600) return Math.round(s / 60) + 'm ago';
+  if (s < 86400) return Math.round(s / 3600) + 'h ago';
+  return Math.round(s / 86400) + 'd ago';
+}
+
 function renderExecSummary(es) {
   const box = $('exec-summary');
   if (!es) { box.style.display = 'none'; return; }
@@ -1543,7 +1550,8 @@ function renderCWV(cwv, attempted) {
     const rating = fieldObj && fieldObj.rating ? cwvBadge(fieldObj.rating) : '';
     return `<div class="cwv-metric"><div class="cwv-metric-label">${label}</div><div class="cwv-metric-val">${val}</div>${rating}</div>`;
   };
-  const src = cwv.has_field ? 'Real Chrome user data (CrUX)' : 'Lighthouse lab test';
+  let src = cwv.has_field ? 'Real Chrome user data (CrUX)' : 'Lighthouse lab test';
+  if (cwv.stale && cwv.measured_at) src += ' · last measured ' + timeAgo(cwv.measured_at);
   const perf = cwv.perf_score != null
     ? `<div class="cwv-perf"><div class="cwv-perf-score" style="color:${gradeColor(cwv.perf_score)}">${cwv.perf_score}</div><div class="cwv-perf-label">Lighthouse<br>Performance</div></div>` : '';
   box.innerHTML = `

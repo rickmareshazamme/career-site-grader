@@ -19,6 +19,36 @@ def _pillar_scores(complete_event):
     return {k: v['score'] for k, v in complete_event.get('pillars', {}).items()}
 
 
+def _persist_and_enrich(event, fallback_url, mode):
+    """Save the grade, attach benchmark, and cache / restore Core Web Vitals.
+    Best-effort: never raises into the grading path."""
+    domain = event.get('domain', '')
+    graded_url = event.get('url', fallback_url)
+    try:
+        prior = db.history(domain, mode)
+        db.save_grade(graded_url, domain, mode, event.get('overall_score', 0),
+                      event.get('grade', ''), _pillar_scores(event))
+        bench = db.percentile(mode, event.get('overall_score', 0))
+        if bench:
+            event['benchmark'] = bench
+        if prior:
+            event['history'] = prior
+    except Exception:
+        pass
+    # Core Web Vitals: cache a good result, or fall back to the last good one.
+    try:
+        cwv = event.get('core_web_vitals')
+        if cwv and cwv.get('perf_score') is not None:
+            db.save_cwv(graded_url, mode, cwv)
+        elif event.get('cwv_attempted'):
+            cached = db.get_cwv(graded_url, mode)
+            if cached:
+                event['core_web_vitals'] = cached
+    except Exception:
+        pass
+    return event
+
+
 async def _grade_competitor(url: str, mode: str) -> dict:
     """Light grade (no PageSpeed) of a competitor — returns headline + pillar scores."""
     try:
@@ -64,20 +94,7 @@ def run_grader_in_thread(url: str, mode: str, competitors, q: queue.Queue):
         grader = CareerSiteGrader(url, mode=mode)
         async for event in grader.grade():
             if event.get('type') == 'complete':
-                # Persist + benchmark + history (best-effort; never blocks grading)
-                try:
-                    domain = event.get('domain', '')
-                    prior = db.history(domain, mode)
-                    db.save_grade(event.get('url', url), domain, mode,
-                                  event.get('overall_score', 0), event.get('grade', ''),
-                                  _pillar_scores(event))
-                    bench = db.percentile(mode, event.get('overall_score', 0))
-                    if bench:
-                        event['benchmark'] = bench
-                    if prior:
-                        event['history'] = prior
-                except Exception:
-                    pass
+                _persist_and_enrich(event, url, mode)
                 if competitors:
                     q.put({'type': 'status', 'message': f'Benchmarking against {len(competitors)} competitor(s)...', 'progress': 99})
                     try:
@@ -122,7 +139,7 @@ def grade():
 
         while True:
             try:
-                item = q.get(timeout=60)
+                item = q.get(timeout=120)
             except queue.Empty:
                 yield f"data: {json.dumps({'type': 'error', 'message': 'Timeout waiting for analysis'})}\n\n"
                 break
@@ -215,15 +232,7 @@ def api_grade():
         loop.close()
     if not result or 'error' in (result or {}):
         return jsonify(result or {'error': 'no result'}), 502
-    try:
-        db.save_grade(result.get('url', url), result.get('domain', ''), mode,
-                      result.get('overall_score', 0), result.get('grade', ''),
-                      _pillar_scores(result))
-        bench = db.percentile(mode, result.get('overall_score', 0))
-        if bench:
-            result['benchmark'] = bench
-    except Exception:
-        pass
+    _persist_and_enrich(result, url, mode)
     resp = jsonify(result)
     resp.headers['Access-Control-Allow-Origin'] = '*'
     return resp

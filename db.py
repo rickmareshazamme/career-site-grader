@@ -64,6 +64,13 @@ def init_db():
                     created_at REAL, last_run REAL
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_monitor_unique ON monitors(email, url, mode);
+
+                CREATE TABLE IF NOT EXISTS cwv (
+                    url TEXT, mode TEXT,
+                    cwv_json TEXT,
+                    created_at REAL,
+                    PRIMARY KEY (url, mode)
+                );
                 """
             )
         return True
@@ -172,6 +179,39 @@ def mark_monitor_run(monitor_id: int):
             conn.execute('UPDATE monitors SET last_run=? WHERE id=?', (time.time(), monitor_id))
     except Exception:
         pass
+
+
+def save_cwv(url: str, mode: str, cwv: Dict) -> bool:
+    """Cache the last successful Core Web Vitals for a URL so a later timed-out
+    PageSpeed run can fall back to it instead of showing nothing."""
+    if not _ENABLED or not cwv:
+        return False
+    try:
+        with _LOCK, _connect() as conn:
+            conn.execute(
+                'INSERT INTO cwv (url, mode, cwv_json, created_at) VALUES (?,?,?,?) '
+                'ON CONFLICT(url, mode) DO UPDATE SET cwv_json=excluded.cwv_json, created_at=excluded.created_at',
+                (url, mode, json.dumps(cwv), time.time()))
+        return True
+    except Exception:
+        return False
+
+
+def get_cwv(url: str, mode: str) -> Optional[Dict]:
+    if not _ENABLED:
+        return None
+    try:
+        with _LOCK, _connect() as conn:
+            row = conn.execute('SELECT cwv_json, created_at FROM cwv WHERE url=? AND mode=?',
+                               (url, mode)).fetchone()
+        if not row:
+            return None
+        cwv = json.loads(row['cwv_json'])
+        cwv['stale'] = True
+        cwv['measured_at'] = row['created_at']
+        return cwv
+    except Exception:
+        return None
 
 
 def stats() -> Dict:
