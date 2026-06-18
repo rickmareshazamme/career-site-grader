@@ -1577,18 +1577,28 @@ function renderCWV(cwv, attempted, url, mode) {
   const hasData = cwv && (cwv.perf_score != null || cwv.has_field);
   if (hasData) { box.style.display = ''; box.innerHTML = cwvCardHtml(cwv); return; }
   if (!attempted) { box.style.display = 'none'; return; }
-  // Grade didn't capture CWV in time — fetch it off the critical path.
+  // Grade didn't capture CWV in time — poll for it off the critical path.
   box.style.display = '';
   box.innerHTML = cwvMeasuringHtml();
-  const myId = ++_cwvReqId;
+  pollCwv(url, mode, 0, ++_cwvReqId);
+}
+
+function pollCwv(url, mode, tries, myId) {
+  const box = $('cwv-section');
   fetch('/api/cwv?url=' + encodeURIComponent(url) + '&mode=' + encodeURIComponent(mode))
     .then(r => r.json())
     .then(j => {
-      if (myId !== _cwvReqId) return; // a newer grade superseded this
+      if (myId !== _cwvReqId) return; // superseded by a newer grade
       const c = j && j.core_web_vitals;
-      box.innerHTML = (c && (c.perf_score != null || c.has_field)) ? cwvCardHtml(c) : cwvNoteHtml();
+      if (c && (c.perf_score != null || c.has_field)) { box.innerHTML = cwvCardHtml(c); return; }
+      if (tries < 30) { setTimeout(() => { if (myId === _cwvReqId) pollCwv(url, mode, tries + 1, myId); }, 5000); }
+      else { box.innerHTML = cwvNoteHtml(); }
     })
-    .catch(() => { if (myId === _cwvReqId) box.innerHTML = cwvNoteHtml(); });
+    .catch(() => {
+      if (myId !== _cwvReqId) return;
+      if (tries < 30) { setTimeout(() => { if (myId === _cwvReqId) pollCwv(url, mode, tries + 1, myId); }, 5000); }
+      else { box.innerHTML = cwvNoteHtml(); }
+    });
 }
 
 function renderComparison(comp, pillars) {

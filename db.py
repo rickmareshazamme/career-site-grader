@@ -222,6 +222,8 @@ def stats() -> Dict:
             grades = conn.execute('SELECT COUNT(*) n FROM grades').fetchone()['n']
             leads = conn.execute('SELECT COUNT(*) n FROM leads').fetchone()['n']
             monitors = conn.execute('SELECT COUNT(*) n FROM monitors WHERE active=1').fetchone()['n']
-        return {'enabled': True, 'grades': grades, 'leads': leads, 'monitors': monitors, 'db': DB_PATH}
+            cwv = conn.execute('SELECT COUNT(*) n FROM cwv').fetchone()['n']
+        return {'enabled': True, 'grades': grades, 'leads': leads, 'monitors': monitors,
+                'cwv_cached': cwv, 'db': DB_PATH}
     except Exception:
         return {'enabled': False}

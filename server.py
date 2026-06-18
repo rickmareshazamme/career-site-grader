@@ -203,39 +203,56 @@ def api_history():
     return jsonify({'domain': domain, 'mode': mode, 'history': db.history(domain, mode)})
 
 
+_cwv_jobs = set()
+_cwv_lock = threading.Lock()
+
+
+def _measure_cwv_bg(url, mode):
+    """Background Core Web Vitals measurement — runs the slow PageSpeed pass and
+    caches the result so polling requests stay instant."""
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        async def run():
+            g = CareerSiteGrader(url, mode=mode)
+            g.psi_timeouts = (75, 55)
+            await g._fetch_pagespeed()
+            return g.pagespeed
+
+        try:
+            cwv = loop.run_until_complete(run())
+        finally:
+            loop.close()
+        if cwv and cwv.get('perf_score') is not None:
+            db.save_cwv(url, mode, cwv)
+    except Exception:
+        pass
+    finally:
+        with _cwv_lock:
+            _cwv_jobs.discard((url, mode))
+
+
 @app.route('/api/cwv')
 def api_cwv():
-    """Fetch Core Web Vitals for a URL off the critical path — a generous,
-    retrying PageSpeed run for heavy sites. Returns cached data if the fresh run
-    can't complete. The front-end calls this when the grade itself didn't capture
-    CWV in time, so the report renders instantly and CWV fills in after."""
+    """Fast, poll-friendly Core Web Vitals. Returns cached data immediately if we
+    have it; otherwise kicks off a background measurement and returns 'pending'
+    so the browser can poll without holding a long connection open (which proxies
+    and browsers cut off)."""
     url = (request.args.get('url') or '').strip()
     mode = (request.args.get('mode') or 'recruitment').strip()
     if not url:
         return jsonify({'error': 'url required'}), 400
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    async def run():
-        g = CareerSiteGrader(url, mode=mode)
-        g.psi_timeouts = (75, 55)  # generous off-path budget
-        await g._fetch_pagespeed()
-        return g.pagespeed
-
-    try:
-        cwv = loop.run_until_complete(run())
-    except Exception:
-        cwv = None
-    finally:
-        loop.close()
-
-    if cwv and cwv.get('perf_score') is not None:
-        db.save_cwv(url, mode, cwv)
-        resp = jsonify({'core_web_vitals': cwv})
-    else:
-        cached = db.get_cwv(url, mode)
-        resp = jsonify({'core_web_vitals': cached})  # may be null
+    cached = db.get_cwv(url, mode)
+    status = 'ready' if cached else 'pending'
+    if not cached:
+        key = (url, mode)
+        with _cwv_lock:
+            if key not in _cwv_jobs:
+                _cwv_jobs.add(key)
+                threading.Thread(target=_measure_cwv_bg, args=(url, mode), daemon=True).start()
+    resp = jsonify({'status': status, 'core_web_vitals': cached})
     resp.headers['Access-Control-Allow-Origin'] = '*'
     return resp
 
