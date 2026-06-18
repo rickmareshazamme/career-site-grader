@@ -1,5 +1,6 @@
 import asyncio
 import aiohttp
+import os
 import time
 import json
 import re
@@ -21,12 +22,18 @@ class CareerSiteGrader:
         'Accept-Encoding': 'gzip, deflate, br',
     }
 
-    def __init__(self, url: str, mode: str = 'recruitment'):
+    def __init__(self, url: str, mode: str = 'recruitment', light: bool = False):
         self.raw_url = url
         self.url = self._normalize_url(url)
         self.parsed = urlparse(self.url)
         self.base_url = f"{self.parsed.scheme}://{self.parsed.netloc}"
         self.mode = mode
+        # light mode skips the slow PageSpeed call (used for competitor benchmarks)
+        self.light = light
+        self.psi_key = os.environ.get('PAGESPEED_API_KEY', '')
+        self.enable_psi = os.environ.get('ENABLE_PAGESPEED', '1') != '0'
+        self.pagespeed: Optional[Dict] = None
+        self._psi_task = None
         self.soup: Optional[BeautifulSoup] = None
         self.html = ''
         self.response_time = 0.0
@@ -70,6 +77,11 @@ class CareerSiteGrader:
             'message': f'Connected! Page size: {len(self.html):,} bytes — running deep analysis...',
             'progress': 12,
         }
+
+        # Kick off Google PageSpeed/Lighthouse in the background so its latency
+        # overlaps the rest of the analysis. Awaited inside the technical pillar.
+        if self.enable_psi and not self.light:
+            self._psi_task = asyncio.ensure_future(self._fetch_pagespeed())
 
         # Parallel secondary fetches
         yield {'type': 'status', 'message': 'Checking AI crawler access and robots.txt...', 'progress': 18}
@@ -126,6 +138,7 @@ class CareerSiteGrader:
         for pillar_id, pillar_name, fn, progress in pillars_config:
             yield {'type': 'status', 'message': f'Analysing {pillar_name}...', 'progress': progress}
             result = await fn()
+            self._attach_guidance(result)
             pillar_results[pillar_id] = result
             yield {'type': 'pillar_complete', 'pillar': pillar_id, 'data': result}
 
@@ -134,6 +147,7 @@ class CareerSiteGrader:
 
         recommendations = self._generate_recommendations(pillar_results)
         shazamme_items = self._generate_shazamme_advantage(pillar_results) if self.mode != 'general' else []
+        executive_summary = self._generate_executive_summary(pillar_results, overall, recommendations)
 
         text_content = self.soup.get_text() if self.soup else ''
         word_count = len(re.findall(r'\w+', text_content))
@@ -151,6 +165,8 @@ class CareerSiteGrader:
             'pillars': pillar_results,
             'recommendations': recommendations,
             'shazamme_advantage': shazamme_items,
+            'executive_summary': executive_summary,
+            'core_web_vitals': self.pagespeed,
             'mode': self.mode,
             'progress': 100,
         }
@@ -269,6 +285,69 @@ class CareerSiteGrader:
                 await asyncio.gather(*[fetch_one(p) for p in paths])
         except Exception:
             pass
+
+    async def _fetch_pagespeed(self):
+        """Google PageSpeed Insights v5 — Lighthouse lab metrics + CrUX field
+        data (real Core Web Vitals from Chrome users). Optional and best-effort:
+        degrades silently to TTFB-only if no key / quota / timeout. Lighthouse
+        also fully renders the page, giving us a rendered-DOM performance signal
+        the static fetch cannot measure."""
+        endpoint = 'https://www.googleapis.com/pagespeedonline/v5/runPagespeed'
+        params = [('url', self.url), ('strategy', 'mobile')]
+        for c in ('performance', 'seo', 'accessibility', 'best-practices'):
+            params.append(('category', c))
+        if self.psi_key:
+            params.append(('key', self.psi_key))
+        try:
+            timeout = aiohttp.ClientTimeout(total=35)
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async with sess.get(endpoint, params=params) as resp:
+                    if resp.status != 200:
+                        return
+                    data = await resp.json()
+            self.pagespeed = self._parse_pagespeed(data)
+        except Exception:
+            self.pagespeed = None
+
+    def _parse_pagespeed(self, data: dict) -> Optional[Dict]:
+        lr = data.get('lighthouseResult', {})
+        cats = lr.get('categories', {})
+        audits = lr.get('audits', {})
+
+        def cat_score(k):
+            v = cats.get(k, {}).get('score')
+            return round(v * 100) if isinstance(v, (int, float)) else None
+
+        def audit_num(k):
+            return audits.get(k, {}).get('numericValue')
+
+        le = data.get('loadingExperience', {}).get('metrics', {})
+
+        def field(metric):
+            m = le.get(metric, {})
+            return {'p75': m.get('percentile'), 'rating': m.get('category')}  # FAST/AVERAGE/SLOW
+
+        result = {
+            'perf_score': cat_score('performance'),
+            'seo_score': cat_score('seo'),
+            'a11y_score': cat_score('accessibility'),
+            'bp_score': cat_score('best-practices'),
+            'lab': {
+                'lcp_ms': audit_num('largest-contentful-paint'),
+                'cls': audit_num('cumulative-layout-shift'),
+                'tbt_ms': audit_num('total-blocking-time'),
+                'fcp_ms': audit_num('first-contentful-paint'),
+                'si_ms': audit_num('speed-index'),
+            },
+            'field': {
+                'lcp': field('LARGEST_CONTENTFUL_PAINT_MS'),
+                'inp': field('INTERACTION_TO_NEXT_PAINT'),
+                'cls': field('CUMULATIVE_LAYOUT_SHIFT_SCORE'),
+                'fcp': field('FIRST_CONTENTFUL_PAINT_MS'),
+            },
+            'has_field': bool(le),
+        }
+        return result
 
     # -------------------------------------------------------------------------
     # Helpers
@@ -2104,6 +2183,81 @@ class CareerSiteGrader:
         score = 0
         max_score = 0
 
+        # Wait for the background PageSpeed/Lighthouse task (if any) to finish.
+        if self._psi_task is not None:
+            try:
+                await self._psi_task
+            except Exception:
+                self.pagespeed = None
+
+        # --- Core Web Vitals & Lighthouse (real field + lab data) ---
+        psi = self.pagespeed
+        if psi:
+            # Lighthouse Performance Score (lab, rendered)
+            ps = psi.get('perf_score')
+            if ps is not None:
+                lh_max = 25
+                lh_pts = round(lh_max * ps / 100)
+                rating = 'excellent' if ps >= 90 else ('needs work' if ps >= 50 else 'poor')
+                checks.append({'name': 'Lighthouse Performance', 'weight': lh_max, 'score': lh_pts, 'max': lh_max,
+                               'status': self._pts_status(lh_pts, lh_max),
+                               'detail': f'Google Lighthouse mobile performance score {ps}/100 — {rating}',
+                               'value': f'{ps}/100'})
+                score += lh_pts; max_score += lh_max
+
+            # Core Web Vitals — prefer real-user field data, fall back to lab
+            cwv_max = 25
+            cwv_pts = 0; cwv_notes = []; has_data = False
+            field = psi.get('field', {})
+            lab = psi.get('lab', {})
+
+            def rate_metric(name, value, good, poor, unit='ms'):
+                # returns (points_fraction 0..1, note)
+                if value is None:
+                    return None, None
+                if value <= good:
+                    frac, tag = 1.0, 'good ✓'
+                elif value <= poor:
+                    frac, tag = 0.5, 'needs improvement'
+                else:
+                    frac, tag = 0.0, 'poor'
+                disp = f'{value/1000:.2f}s' if unit == 'ms' else f'{value:.3f}'
+                return frac, f'{name} {disp} ({tag})'
+
+            # LCP
+            lcp_field = field.get('lcp', {}).get('p75')
+            lcp_val = lcp_field if lcp_field is not None else lab.get('lcp_ms')
+            frac, note = rate_metric('LCP', lcp_val, 2500, 4000)
+            if frac is not None:
+                cwv_pts += frac * 9; cwv_notes.append(note); has_data = True
+            # INP (field only) / TBT (lab proxy)
+            inp_val = field.get('inp', {}).get('p75')
+            if inp_val is not None:
+                frac, note = rate_metric('INP', inp_val, 200, 500)
+                cwv_pts += frac * 8; cwv_notes.append(note); has_data = True
+            else:
+                tbt = lab.get('tbt_ms')
+                frac, note = rate_metric('TBT', tbt, 200, 600)
+                if frac is not None:
+                    cwv_pts += frac * 8; cwv_notes.append(note); has_data = True
+            # CLS
+            cls_field = field.get('cls', {}).get('p75')
+            cls_val = cls_field if cls_field is not None else lab.get('cls')
+            if cls_val is not None:
+                # CrUX returns CLS*100 in percentile; lab returns raw — normalise
+                cls_norm = cls_val / 100 if cls_field is not None else cls_val
+                frac, note = rate_metric('CLS', cls_norm, 0.1, 0.25, unit='score')
+                cwv_pts += frac * 8; cwv_notes.append(note); has_data = True
+
+            if has_data:
+                source = 'real-user field data (CrUX)' if psi.get('has_field') else 'lab (Lighthouse)'
+                cwv_pts = round(min(cwv_pts, cwv_max))
+                checks.append({'name': 'Core Web Vitals', 'weight': cwv_max, 'score': cwv_pts, 'max': cwv_max,
+                               'status': self._pts_status(cwv_pts, cwv_max),
+                               'detail': f'{" | ".join(cwv_notes)} — source: {source}',
+                               'value': source})
+                score += cwv_pts; max_score += cwv_max
+
         # --- HTTPS ---
         https_max = 15 if self.mode == 'general' else 20
         is_https = self.url.startswith('https://')
@@ -2383,6 +2537,136 @@ class CareerSiteGrader:
     # -------------------------------------------------------------------------
     # Recommendations & Shazamme Advantage
     # -------------------------------------------------------------------------
+
+    # -------------------------------------------------------------------------
+    # Per-check remediation guidance ("what it is, why it matters, how to fix")
+    # Attached to every check so a non-expert can understand and act on it.
+    # -------------------------------------------------------------------------
+    GUIDANCE = {
+        'Title Tag': 'The <title> is the clickable headline in Google and the tab name. Write a unique 50-60 character title per page, lead with the primary keyword (e.g. "Healthcare Recruitment Agency | Brand"). Set it in your CMS/page settings — on Duda/Shazamme it is the page SEO title field.',
+        'Meta Description': 'The grey snippet under your title in search results. Write a unique 120-160 character summary with a call to action and your main keyword. It does not affect ranking directly but lifts click-through. Edit it in the page SEO settings.',
+        'H1 Heading': 'The single main on-page headline. Use exactly one <h1> per page describing the page topic (e.g. "Nursing Jobs Across Australia"). Most page builders mark the top hero heading as H1 — check it is not skipped or duplicated.',
+        'Schema / Structured Data': 'Machine-readable JSON-LD that tells Google and AI engines what your page is. Add Organization (or StaffingAgency) on the homepage and JobPosting on job pages. Generate it at schema.org / Google Rich Results, paste into a <script type="application/ld+json"> block, and validate with the Rich Results Test.',
+        'Structured Data Validity': 'Schema only works if it is complete and valid. JobPosting needs title, datePosted, validThrough, hiringOrganization, jobLocation, employmentType and baseSalary to be eligible for Google Jobs. Add a WebSite + SearchAction block for a sitelinks search box. Test every template in Google\'s Rich Results Test and fix any errors.',
+        'Open Graph / Social Tags': 'og:title, og:description and og:image control how your link looks when shared on LinkedIn, WhatsApp and Slack. Add all four og tags plus a 1200×630 share image so shares render with a branded card instead of a bare URL.',
+        'Canonical URL': 'A <link rel="canonical"> tells Google which URL is the master version, preventing duplicate-content dilution from tracking params or www/non-www variants. Add a self-referencing canonical to every page.',
+        'Indexability': 'Controls whether Google is allowed to list the page. A "noindex" robots meta tag hides the page from search entirely — only use it on thank-you/admin pages. Make sure your money pages do NOT carry noindex.',
+        'Heading Hierarchy': 'H2/H3 subheadings break content into scannable, topic-labelled sections that both readers and AI engines parse. Add 4+ descriptive H2s (and H3s beneath them) instead of a wall of text.',
+        'Industry & Sector Pages': 'Dedicated pages like "Accounting Jobs" or "IT Recruitment" capture high-intent searches and are 60-80% of recruiter organic traffic. Build one SEO page per sector you recruit in, each with its own title, copy and a live job feed. Shazamme can auto-generate these.',
+        'Sitemap.xml': 'An XML list of all your URLs that search engines use to discover pages. Generate /sitemap.xml automatically and submit it in Google Search Console so new jobs and pages get crawled fast.',
+        'AI Crawler Access': 'AI engines (ChatGPT, Perplexity, Gemini, Claude) can only cite you if their crawlers are allowed in robots.txt. Make sure GPTBot, OAI-SearchBot, ClaudeBot, Google-Extended, PerplexityBot and others are not Disallowed. Add a Sitemap: line to robots.txt too.',
+        'llms.txt File': 'An emerging standard (/llms.txt) — a plain-text map of your most important content for AI models, like a sitemap for LLMs. Add a markdown file at /llms.txt listing your key pages and a one-line description of each.',
+        'llm-info File': 'A structured file (/.well-known/llm-info or /llm-info) telling AI models who you are, what you do, your sectors and locations, so they represent you accurately in generated answers. Add one with your brand facts. Every Shazamme site ships with this.',
+        'FAQ & Q&A Schema': 'FAQPage structured data lets your answers appear directly in Google and AI results. Add a real FAQ section (question in a heading, answer below) and wrap it in FAQPage JSON-LD. Target the actual questions candidates and employers ask.',
+        'Content Structure': 'AI engines extract answers from well-structured content. Use multiple H2 sections, short paragraphs and bullet lists so each topic is cleanly delimited and machine-readable.',
+        'Entity & Authority': 'This is how AI engines confirm WHO you are and whether to trust you. Add Organization schema with sameAs links to your LinkedIn, Crunchbase and (ideally) Wikidata/Wikipedia; publish consistent name/address/phone; add an About/Team page with named people and bios; and display accreditations (REC, APSCo, ISO). These build E-E-A-T and Knowledge-Graph presence.',
+        'Content Depth': 'Thin pages give Google and AI engines little to rank or quote. Aim for 800-1,000+ words of genuinely useful, original content on key pages — explain the service, the sector, the process, salaries and FAQs.',
+        'AEO / Answer-Engine Readiness': 'Answer Engine Optimisation = shaping content so ChatGPT/Perplexity/AI Overviews quote you. Add a short TL;DR/summary near the top, phrase headings as the questions people ask ("How much do nurses earn in 2026?"), answer in the first sentence under each heading, use comparison tables, cite concrete stats, and show a "last updated" date.',
+        'Crawlable Content (JS-render)': 'Most AI crawlers do NOT run JavaScript, so any content (including your job listings) that only appears after client-side rendering is invisible to them. Ensure the important text exists in the raw HTML via server-side rendering, pre-rendering or a static snapshot. Shazamme v2 feed_cache serves a static job snapshot for exactly this.',
+        'Mobile Readiness': '60%+ of job searches are on mobile. Add a responsive <meta name="viewport" content="width=device-width, initial-scale=1"> and test on a phone. Modern site builders handle this — confirm the viewport tag is present.',
+        'Accessibility (WCAG)': 'Accessible sites reach more candidates and reduce legal risk. Set a lang attribute on <html>, add descriptive alt text to every meaningful image, ensure colour contrast, and provide a skip-to-content link.',
+        'Apply Flow & Job Search': 'The core candidate journey: finding a role and applying. Provide an obvious job search on /job-results and a clear Apply button on /job-detail, and keep the application form short (≤5 fields). If your board is a widget, make sure the rendered apply button is reachable. Shazamme delivers a mobile-first, ATS-integrated apply flow.',
+        'ATS Platform Detection': 'An Applicant Tracking System is needed for candidates to actually complete and for you to manage applications. Integrate your ATS (Bullhorn, JobAdder, Greenhouse, etc.) so applies flow into your hiring pipeline instead of an email inbox.',
+        'Navigation & Structure': 'Clear navigation helps users and search engines. Use a semantic <nav> element, a logical menu, and breadcrumbs on deep pages so people (and crawlers) always know where they are.',
+        'HTTPS Trust Signal': 'Without HTTPS, browsers show a "Not Secure" warning that scares candidates off. Install a free SSL certificate (Let\'s Encrypt or via your host) and force https:// site-wide.',
+        'HTTPS / SSL': 'Without HTTPS, browsers warn visitors and Google ranks you lower. Install an SSL certificate (free via Let\'s Encrypt or your host) and redirect all http:// traffic to https://.',
+        'Page Speed (TTFB)': 'Time To First Byte measures server responsiveness; over ~1s loses visitors. Use caching, a CDN and a fast host. (See Core Web Vitals / Lighthouse for the full picture.)',
+        'Server Response (TTFB)': 'Time To First Byte is how fast your server starts replying. Target under 0.5s with server caching, a CDN and a performant host/plan.',
+        'Form Usability': 'Long, unfriendly forms kill conversions. Add <label>s, use the autocomplete attribute (e.g. autocomplete="email"), the right input types, and remove non-essential fields.',
+        'Core Web Vitals': 'Google\'s real-user experience metrics: LCP (loading, target <2.5s), INP (responsiveness, <200ms) and CLS (visual stability, <0.1). Improve by optimising/compressing images, reserving space for elements to stop layout shift, and reducing heavy JavaScript. Data here comes from Chrome users (CrUX) or a Lighthouse lab run.',
+        'Lighthouse Performance': 'Google Lighthouse\'s 0-100 mobile performance score from a fully-rendered test. Below 50 is poor. Fix the biggest offenders: large images, render-blocking scripts, and unused JS/CSS. Run pagespeed.web.dev for the itemised opportunities.',
+        'Content Compression': 'Compressing responses (gzip/Brotli) cuts page weight 60-80% for faster loads. Enable Brotli or gzip at your server/CDN — usually a one-line config or an on/off toggle.',
+        'Caching Strategy': 'Caching headers let browsers and CDNs reuse assets instead of re-downloading. Set Cache-Control with long max-age on static assets and enable ETag/Last-Modified.',
+        'Resource Hints': 'preconnect and preload hints tell the browser to fetch critical resources early. Add <link rel="preconnect"> for third-party origins (fonts, analytics) and preload your hero font/image.',
+        'Render-Blocking Scripts': 'Scripts without defer/async block the page from showing. Add defer or async to non-critical <script> tags, or load them as type="module", so content paints sooner.',
+        'HTTP/2+': 'HTTP/2 or HTTP/3 multiplexes requests for faster loads. Most modern hosts/CDNs (Cloudflare, etc.) enable it automatically — switch it on if your host offers it.',
+        'Analytics & Tracking': 'Without analytics you are blind to what works. Install GA4 (or a privacy-friendly tool like Plausible) plus conversion tracking on applies and enquiries.',
+        'Call-to-Action Strength': 'CTAs tell visitors what to do next. Add clear, repeated, action-led buttons ("Apply Now", "Search Jobs", "Upload CV") in the hero and throughout the page.',
+        'Job Alerts & Lead Capture': 'Most candidates are passive. Offer email job alerts / a saved-search signup so you can re-engage them automatically when a matching role is posted.',
+        'Lead Capture / Newsletter': 'Capture interested visitors before they leave. Add a newsletter or alert signup with a single email field so you can nurture them later.',
+        'Live Chat & Chatbot': 'Chat reduces drop-off and answers questions instantly. Add a chatbot (or live chat) that handles FAQs and guides applicants 24/7. Shazamme includes an AI recruitment chatbot.',
+        'Job Search & Filters': 'Candidates expect instant, filterable search. Provide a keyword search plus filters for location, sector, salary and job type on your results page.',
+        'Search Functionality': 'A site search helps visitors find content fast and they convert at higher rates. Add a search box wired to your content/jobs.',
+        'Social Sharing & Referrals': 'Make it one tap for candidates to share or refer a role. Add share buttons (LinkedIn, WhatsApp, email) and a "refer a friend" option on job pages.',
+        'Social Links & Sharing': 'Link your social profiles and add share buttons so visitors can follow and spread your content.',
+        'Social Proof & Reviews': 'Candidates trust peer signals. Add testimonials, Google/Glassdoor ratings, client logos and placement stats to build credibility.',
+        'Video Content': 'Video lifts application intent ~34%. Embed a culture/team or "day in the life" video (YouTube/Vimeo) on key pages.',
+        'EVP & Pay Transparency': 'Your Employee Value Proposition. Show salary ranges, benefits, flexibility and career growth — 67% of candidates research pay before applying, and transparency wins better-fit applicants.',
+        'Visual Brand Assets': 'A consistent visual identity builds trust. Add a favicon and a branded og:image, and use consistent logo/colours across pages.',
+        'Social Presence': 'Linked, active social profiles extend reach and reassure candidates. Link LinkedIn, Instagram, YouTube etc. in the footer.',
+        'DE&I Commitment': 'Diversity, Equity & Inclusion content matters to many candidates. For employer/career sites, publish a DE&I statement or page. (Not scored for recruitment-agency sites, where it rarely appears.)',
+        'Culture & Team Content': 'Candidates want to see who they\'ll work with. Add culture, "meet the team" and "life at" content with real photos and stories.',
+        'Employee Stories & Testimonials': 'Authentic employee voices are the #1 credibility factor on career sites. Add quotes, written stories or short videos from current staff.',
+        'Strict-Transport-Security': 'The HSTS header forces browsers to always use HTTPS, blocking downgrade attacks. Add: Strict-Transport-Security: max-age=31536000; includeSubDomains.',
+        'Content-Security-Policy': 'CSP restricts what scripts can run, mitigating XSS. Add a Content-Security-Policy header — start in report-only mode, then enforce once tuned.',
+        'X-Content-Type-Options': 'Add the header X-Content-Type-Options: nosniff to stop browsers MIME-sniffing responses into a different (riskier) type.',
+        'X-Frame-Options': 'Prevents clickjacking by stopping your site being embedded in iframes. Add X-Frame-Options: SAMEORIGIN (or a CSP frame-ancestors rule).',
+        'Referrer-Policy': 'Controls how much referrer info leaks to other sites. Add Referrer-Policy: strict-origin-when-cross-origin.',
+        'Permissions-Policy': 'Restricts powerful browser features (camera, geolocation). Add a Permissions-Policy header disabling features you don\'t use.',
+        'Privacy & Cookie Policy': 'Required by GDPR/CCPA. Publish a privacy policy and (if you use non-essential cookies) a consent banner, and link them in the footer.',
+        'Mixed Content': 'HTTP resources on an HTTPS page trigger browser warnings and break the padlock. Update all image/script/style URLs to https://.',
+        'Image Optimization': 'Heavy, unsized images slow pages and cause layout shift. Serve WebP/AVIF, set explicit width/height, and add loading="lazy" to below-the-fold images.',
+        'Image Alt Text': 'Alt text describes images for screen readers and search engines. Add concise, descriptive alt to every meaningful image (decorative ones can be alt="").',
+        'Image Dimensions': 'Setting explicit width and height on images reserves space and prevents layout shift (CLS). Add the attributes to all images.',
+        'Font Loading': 'Web fonts can cause invisible text while loading. Add font-display: swap and preload your primary font file.',
+        'Structured Content': 'Lists and tables make content scannable and machine-extractable. Use <ul>/<ol> and <table> where you have steps, options or comparisons.',
+        'Internal Linking': 'Internal links spread ranking strength and help discovery. Link related pages (sectors, locations, guides) with descriptive anchor text.',
+        'External Links': 'Linking out to authoritative sources adds credibility and context. Cite reputable references where relevant (open in a new tab).',
+        'FAQ Content': 'An FAQ answers buyer/candidate questions and feeds AI answers. Add a real FAQ section and mark it up with FAQPage schema.',
+        'Heading Structure': 'Use a logical H2/H3 outline so readers and crawlers can follow the content. Add descriptive subheadings instead of long unbroken text.',
+    }
+
+    def _attach_guidance(self, pillar_result: Dict):
+        for check in pillar_result.get('checks', []):
+            if check.get('status') in ('warn', 'fail') and check['name'] in self.GUIDANCE:
+                check['help'] = self.GUIDANCE[check['name']]
+
+    def _generate_executive_summary(self, pillars: Dict, overall: int,
+                                    recommendations: List[Dict]) -> Dict:
+        ranked = sorted(pillars.values(), key=lambda p: p['score'])
+        weakest = ranked[:2]
+        strongest = [p['name'] for p in reversed(ranked) if p['score'] >= 75][:3]
+        critical = [r for r in recommendations if r['priority'] == 'critical']
+        top_source = critical if len(critical) >= 3 else recommendations
+        opportunities = []
+        for r in top_source[:3]:
+            opportunities.append({
+                'title': r['check'],
+                'pillar': r['pillar'],
+                'why_it_matters': r['impact'],
+                'how_to_fix': self.GUIDANCE.get(r['check'], r['detail']),
+            })
+
+        if overall >= 85:
+            band = 'a market-leading'
+            verdict_lead = 'This site is already performing strongly'
+        elif overall >= 70:
+            band = 'a solid but improvable'
+            verdict_lead = 'Good foundations are in place'
+        elif overall >= 55:
+            band = 'an underperforming'
+            verdict_lead = 'There is meaningful value being left on the table'
+        else:
+            band = 'a high-risk, underperforming'
+            verdict_lead = 'This site is losing candidates and visibility every day'
+
+        weak_names = ' and '.join(p['name'] for p in weakest)
+        mode_obj = {'recruitment': 'attract candidates and win clients',
+                    'career_site': 'attract and convert talent',
+                    'general': 'attract and convert visitors'}.get(self.mode, 'perform')
+
+        verdict = (f"{verdict_lead}. Scoring {overall}/100, this is {band} site for its ability to "
+                   f"{mode_obj}. The biggest drag is {weak_names}; closing the {len(critical)} "
+                   f"critical gap(s) below would move the score and the commercial result fastest.")
+
+        return {
+            'headline': f'{overall}/100 — {self._grade_label(overall)}',
+            'verdict': verdict,
+            'priority_count': len(critical),
+            'top_opportunities': opportunities,
+            'strengths': strongest,
+            'weakest_pillars': [{'name': p['name'], 'score': p['score']} for p in weakest],
+        }
 
     def _generate_recommendations(self, pillars: Dict) -> List[Dict]:
         IMPACT_RECRUITMENT = {

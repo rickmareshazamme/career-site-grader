@@ -540,6 +540,67 @@ body {
 .check-body {}
 .check-name { font-weight: 600; color: var(--text); margin-bottom: 2px; }
 .check-detail { color: var(--text2); line-height: 1.4; font-size: 12px; }
+.check-help {
+  display: flex; gap: 6px; margin-top: 8px; padding: 8px 10px;
+  background: rgba(99,102,241,0.08); border: 1px solid rgba(99,102,241,0.22);
+  border-radius: 6px; font-size: 12px; color: var(--text2); line-height: 1.5;
+}
+.check-help .material-icons-round { font-size: 15px; color: #818cf8; flex-shrink: 0; margin-top: 1px; }
+
+/* Competitor input */
+.competitor-wrap { margin-top: 10px; }
+#competitor-input {
+  width: 100%; padding: 11px 16px; border-radius: 10px;
+  background: var(--surface, rgba(255,255,255,0.03));
+  border: 1px solid var(--border); color: var(--text1); font-size: 13px;
+}
+#competitor-input::placeholder { color: var(--text3); }
+
+/* Executive summary */
+.exec-summary { margin-bottom: 8px; }
+.exec-card {
+  background: linear-gradient(135deg, rgba(139,92,246,0.10), rgba(34,211,238,0.06));
+  border: 1px solid rgba(139,92,246,0.25); border-radius: 16px; padding: 22px 24px;
+}
+.exec-verdict { font-size: 16px; line-height: 1.6; color: var(--text1); font-weight: 500; }
+.exec-strengths { margin-top: 12px; font-size: 13px; color: var(--text2); }
+.exec-opps-title { margin: 20px 0 12px; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text2); }
+.exec-opp { display: flex; gap: 14px; padding: 14px 0; border-top: 1px solid rgba(255,255,255,0.07); }
+.exec-opp-num {
+  width: 28px; height: 28px; flex-shrink: 0; border-radius: 8px;
+  background: rgba(139,92,246,0.2); color: #c4b5fd; font-weight: 700;
+  display: flex; align-items: center; justify-content: center; font-size: 14px;
+}
+.exec-opp-title { font-weight: 700; color: var(--text1); font-size: 14px; }
+.exec-opp-pillar { font-size: 11px; font-weight: 500; color: var(--text3); margin-left: 6px; }
+.exec-opp-why { font-size: 12.5px; color: var(--text2); margin-top: 3px; line-height: 1.5; }
+.exec-opp-fix { display: flex; gap: 6px; margin-top: 7px; font-size: 12.5px; color: #a7f3d0; line-height: 1.5; }
+.exec-opp-fix .material-icons-round { font-size: 15px; color: #34d399; flex-shrink: 0; margin-top: 1px; }
+
+/* Core Web Vitals */
+.cwv-src { font-size: 11px; font-weight: 500; color: var(--text3); margin-left: 8px; }
+.cwv-card { display: flex; gap: 24px; align-items: center; flex-wrap: wrap;
+  background: rgba(255,255,255,0.03); border: 1px solid var(--border); border-radius: 14px; padding: 20px 24px; }
+.cwv-perf { display: flex; align-items: center; gap: 10px; padding-right: 24px; border-right: 1px solid var(--border); }
+.cwv-perf-score { font-size: 38px; font-weight: 800; line-height: 1; }
+.cwv-perf-label { font-size: 11px; color: var(--text3); line-height: 1.3; }
+.cwv-metrics { display: flex; gap: 28px; flex-wrap: wrap; }
+.cwv-metric { min-width: 90px; }
+.cwv-metric-label { font-size: 12px; color: var(--text2); font-weight: 600; }
+.cwv-metric-label small { color: var(--text3); font-weight: 400; }
+.cwv-metric-val { font-size: 22px; font-weight: 700; color: var(--text1); margin: 3px 0; }
+.cwv-badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 20px; }
+
+/* Competitor table */
+.cmp-rank { font-size: 14px; color: var(--text2); margin-bottom: 12px; }
+.cmp-table-wrap { overflow-x: auto; }
+.cmp-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.cmp-table th, .cmp-table td { padding: 10px 12px; text-align: center; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.cmp-table th:first-child, .cmp-table td:first-child { text-align: left; }
+.cmp-table th { color: var(--text3); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; }
+.cmp-table tr.cmp-target { background: rgba(139,92,246,0.08); }
+.cmp-err { color: var(--text3); font-style: italic; text-align: left; }
+
 .check-value {
   font-size: 11px; color: var(--text3);
   background: rgba(255,255,255,0.04);
@@ -842,6 +903,15 @@ hr.section-divider {
         Grade My Site
       </button>
     </div>
+    <div class="competitor-wrap">
+      <input
+        type="text"
+        id="competitor-input"
+        placeholder="Optional: benchmark vs competitors — paste up to 3 URLs, comma-separated"
+        autocomplete="off" autocapitalize="off" spellcheck="false"
+        aria-label="Competitor URLs"
+      >
+    </div>
     <p class="example-links" id="example-links">Select a mode above to get started</p>
   </form>
 
@@ -946,6 +1016,15 @@ hr.section-divider {
   </div>
 
   <div class="container">
+
+    <!-- Executive summary -->
+    <div class="exec-summary" id="exec-summary" style="display:none"></div>
+
+    <!-- Competitor benchmark -->
+    <div class="comparison-section" id="comparison-section" style="display:none"></div>
+
+    <!-- Core Web Vitals -->
+    <div class="cwv-section" id="cwv-section" style="display:none"></div>
 
     <!-- Pillar cards -->
     <div class="section-title">
@@ -1129,7 +1208,10 @@ function startGrading(e) {
   $('recs-list').innerHTML = '';
   $('shazamme-grid').innerHTML = '';
 
-  const evtSource = new EventSource('/grade?url=' + encodeURIComponent(url) + '&mode=' + selectedMode);
+  const compRaw = ($('competitor-input') ? $('competitor-input').value.trim() : '');
+  let gradeUrl = '/grade?url=' + encodeURIComponent(url) + '&mode=' + selectedMode;
+  if (compRaw) gradeUrl += '&competitors=' + encodeURIComponent(compRaw);
+  const evtSource = new EventSource(gradeUrl);
 
   const checkHistory = [];
 
@@ -1232,6 +1314,11 @@ function renderResults(data) {
   // Scroll to top
   window.scrollTo({ top: 0, behavior: 'smooth' });
 
+  // Executive summary, competitor benchmark, Core Web Vitals
+  renderExecSummary(data.executive_summary);
+  renderComparison(data.comparison, data.pillars);
+  renderCWV(data.core_web_vitals);
+
   // Pillars
   renderPillars(data.pillars);
 
@@ -1244,6 +1331,97 @@ function renderResults(data) {
   } else {
     $('shazamme-section').style.display = 'none';
   }
+}
+
+function renderExecSummary(es) {
+  const box = $('exec-summary');
+  if (!es) { box.style.display = 'none'; return; }
+  box.style.display = '';
+  const oppsHtml = (es.top_opportunities || []).map((o, i) => `
+    <div class="exec-opp">
+      <div class="exec-opp-num">${i + 1}</div>
+      <div class="exec-opp-body">
+        <div class="exec-opp-title">${escHtml(o.title)} <span class="exec-opp-pillar">${escHtml(o.pillar)}</span></div>
+        <div class="exec-opp-why">${escHtml(o.why_it_matters || '')}</div>
+        <div class="exec-opp-fix"><span class="material-icons-round">build</span><span>${escHtml(o.how_to_fix || '')}</span></div>
+      </div>
+    </div>`).join('');
+  const strengths = (es.strengths || []).length
+    ? `<div class="exec-strengths"><strong>Working well:</strong> ${es.strengths.map(escHtml).join(' · ')}</div>` : '';
+  box.innerHTML = `
+    <div class="section-title"><span class="material-icons-round">summarize</span> Executive Summary</div>
+    <div class="exec-card">
+      <div class="exec-verdict">${escHtml(es.verdict || '')}</div>
+      ${strengths}
+      <div class="exec-opps-title">Top ${(es.top_opportunities||[]).length} opportunities to fix first</div>
+      ${oppsHtml}
+    </div>`;
+}
+
+function cwvBadge(rating) {
+  const map = { FAST: ['Good', '#10b981'], AVERAGE: ['Needs work', '#f59e0b'], SLOW: ['Poor', '#f43f5e'] };
+  const m = map[rating] || ['—', '#64748b'];
+  return `<span class="cwv-badge" style="background:${m[1]}1f;color:${m[1]}">${m[0]}</span>`;
+}
+
+function renderCWV(cwv) {
+  const box = $('cwv-section');
+  if (!cwv || (cwv.perf_score == null && !cwv.has_field)) { box.style.display = 'none'; return; }
+  box.style.display = '';
+  const f = cwv.field || {};
+  const lab = cwv.lab || {};
+  const fmtMs = v => (v == null ? '—' : (v / 1000).toFixed(2) + 's');
+  const metric = (label, fieldObj, labVal, unit) => {
+    const p75 = fieldObj && fieldObj.p75 != null ? fieldObj.p75 : null;
+    const val = p75 != null ? (unit === 'cls' ? (p75 / 100).toFixed(2) : fmtMs(p75))
+                            : (labVal != null ? (unit === 'cls' ? labVal.toFixed(2) : fmtMs(labVal)) : '—');
+    const rating = fieldObj && fieldObj.rating ? cwvBadge(fieldObj.rating) : '';
+    return `<div class="cwv-metric"><div class="cwv-metric-label">${label}</div><div class="cwv-metric-val">${val}</div>${rating}</div>`;
+  };
+  const src = cwv.has_field ? 'Real Chrome user data (CrUX)' : 'Lighthouse lab test';
+  const perf = cwv.perf_score != null
+    ? `<div class="cwv-perf"><div class="cwv-perf-score" style="color:${gradeColor(cwv.perf_score)}">${cwv.perf_score}</div><div class="cwv-perf-label">Lighthouse<br>Performance</div></div>` : '';
+  box.innerHTML = `
+    <hr class="section-divider">
+    <div class="section-title"><span class="material-icons-round">speed</span> Core Web Vitals <span class="cwv-src">${escHtml(src)}</span></div>
+    <div class="cwv-card">
+      ${perf}
+      <div class="cwv-metrics">
+        ${metric('LCP <small>loading</small>', f.lcp, lab.lcp_ms, 'ms')}
+        ${metric('INP <small>responsiveness</small>', f.inp, lab.tbt_ms, 'ms')}
+        ${metric('CLS <small>visual stability</small>', f.cls, lab.cls, 'cls')}
+      </div>
+    </div>`;
+}
+
+function renderComparison(comp, pillars) {
+  const box = $('comparison-section');
+  if (!comp || !comp.competitors || !comp.competitors.length) { box.style.display = 'none'; return; }
+  box.style.display = '';
+  const t = comp.target;
+  const rows = [t, ...comp.competitors];
+  const pillarKeys = Object.keys(pillars);
+  const pillarNames = pillarKeys.map(k => pillars[k].name);
+  const head = `<th>Site</th><th>Overall</th>` + pillarNames.map(n => `<th>${escHtml(n.split(' ')[0])}</th>`).join('');
+  const bodyRows = rows.map((r, idx) => {
+    const isTarget = idx === 0;
+    if (r.error) return `<tr class="${isTarget?'cmp-target':''}"><td>${escHtml(r.domain || r.url)}</td><td colspan="${pillarKeys.length+1}" class="cmp-err">Could not analyse: ${escHtml(r.error)}</td></tr>`;
+    const cells = pillarKeys.map(k => {
+      const v = r.pillars ? r.pillars[k] : null;
+      return `<td style="color:${v==null?'#64748b':gradeColor(v)}">${v==null?'—':v}</td>`;
+    }).join('');
+    return `<tr class="${isTarget?'cmp-target':''}">
+      <td>${isTarget?'<strong>'+escHtml(r.domain)+' (you)</strong>':escHtml(r.domain||r.url)}</td>
+      <td><strong style="color:${gradeColor(r.overall_score)}">${r.overall_score}</strong> ${escHtml(r.grade||'')}</td>
+      ${cells}</tr>`;
+  }).join('');
+  const rankNote = comp.rank && comp.field_size
+    ? `<div class="cmp-rank">You rank <strong>#${comp.rank}</strong> of ${comp.field_size} on overall score.</div>` : '';
+  box.innerHTML = `
+    <hr class="section-divider">
+    <div class="section-title"><span class="material-icons-round">leaderboard</span> Competitor Benchmark</div>
+    ${rankNote}
+    <div class="cmp-table-wrap"><table class="cmp-table"><thead><tr>${head}</tr></thead><tbody>${bodyRows}</tbody></table></div>`;
 }
 
 function renderPillars(pillars) {
@@ -1282,6 +1460,7 @@ function makePillarCard(p) {
         <div class="check-name">${escHtml(c.name)}</div>
         <div class="check-detail">${escHtml(c.detail || '')}</div>
         ${c.value ? `<div class="check-value">${escHtml(c.value)}</div>` : ''}
+        ${c.help ? `<div class="check-help"><span class="material-icons-round">lightbulb</span><span>${escHtml(c.help)}</span></div>` : ''}
       </div>
     </div>
   `).join('');

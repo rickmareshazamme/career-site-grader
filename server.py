@@ -9,7 +9,43 @@ from grader import CareerSiteGrader
 app = Flask(__name__, static_folder='public')
 
 
-def run_grader_in_thread(url: str, mode: str, q: queue.Queue):
+async def _grade_competitor(url: str, mode: str) -> dict:
+    """Light grade (no PageSpeed) of a competitor — returns headline + pillar scores."""
+    try:
+        g = CareerSiteGrader(url, mode=mode, light=True)
+        final = None
+        async for ev in g.grade():
+            if ev.get('type') == 'error':
+                return {'url': url, 'domain': g.parsed.netloc, 'error': ev.get('message', 'failed')}
+            if ev.get('type') == 'complete':
+                final = ev
+        if not final:
+            return {'url': url, 'domain': g.parsed.netloc, 'error': 'no result'}
+        return {
+            'url': url,
+            'domain': final['domain'],
+            'overall_score': final['overall_score'],
+            'grade': final['grade'],
+            'pillars': {k: v['score'] for k, v in final['pillars'].items()},
+        }
+    except Exception as e:
+        return {'url': url, 'error': str(e)}
+
+
+async def _build_comparison(competitor_urls, mode, target_event) -> dict:
+    results = await asyncio.gather(*[_grade_competitor(u, mode) for u in competitor_urls])
+    target = {
+        'domain': target_event['domain'],
+        'overall_score': target_event['overall_score'],
+        'grade': target_event['grade'],
+        'pillars': {k: v['score'] for k, v in target_event['pillars'].items()},
+    }
+    scored = [r for r in results if 'overall_score' in r]
+    rank = 1 + sum(1 for r in scored if r['overall_score'] > target['overall_score'])
+    return {'target': target, 'competitors': results, 'rank': rank, 'field_size': len(scored) + 1}
+
+
+def run_grader_in_thread(url: str, mode: str, competitors, q: queue.Queue):
     """Run the async grader in a background thread and push events to queue."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -17,6 +53,12 @@ def run_grader_in_thread(url: str, mode: str, q: queue.Queue):
     async def collect():
         grader = CareerSiteGrader(url, mode=mode)
         async for event in grader.grade():
+            if event.get('type') == 'complete' and competitors:
+                q.put({'type': 'status', 'message': f'Benchmarking against {len(competitors)} competitor(s)...', 'progress': 99})
+                try:
+                    event['comparison'] = await _build_comparison(competitors, mode, event)
+                except Exception:
+                    pass
             q.put(event)
         q.put(None)  # sentinel
 
@@ -45,9 +87,13 @@ def grade():
     if mode not in VALID_MODES:
         return jsonify({'error': f'mode parameter required. Must be one of: {", ".join(VALID_MODES)}'}), 400
 
+    # Optional competitor benchmarking (comma-separated URLs, max 3)
+    raw_comp = (request.args.get('competitors') or '').strip()
+    competitors = [c.strip() for c in raw_comp.split(',') if c.strip()][:3] if raw_comp else []
+
     def generate():
         q: queue.Queue = queue.Queue()
-        t = threading.Thread(target=run_grader_in_thread, args=(url, mode, q), daemon=True)
+        t = threading.Thread(target=run_grader_in_thread, args=(url, mode, competitors, q), daemon=True)
         t.start()
 
         while True:
