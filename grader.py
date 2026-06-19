@@ -638,15 +638,28 @@ class CareerSiteGrader:
                     types.append(str(t))
         return types
 
+    # A dynamic job page (one per job posting) — FAQ/content schema isn't expected
+    # here, so these are excluded from content-coverage denominators.
+    JOB_PAGE_URL = re.compile(
+        r'/job-?detail|jobid=|/job/\d|/jobs?/[^/?]+/[^/?]+|/job-?results?/[^/?]+/[^/?]+|'
+        r'/jobseekers/job-results/[^/?]+/[^/?]+', re.I)
+
     def _get_coverage(self) -> Dict:
-        """Site-wide schema coverage across every scanned page: how many pages
-        carry FAQ / JobPosting / Organization / Breadcrumb schema."""
+        """Site-wide schema coverage across every scanned page. FAQ/content metrics
+        use CONTENT pages as the denominator — dynamic job listing pages (which
+        carry JobPosting, not FAQ) are excluded so coverage isn't unfairly diluted."""
         if self.coverage:
             return self.coverage
-        soups = self._all_soups()
-        faq = job = org = crumb = 0
-        for s in soups:
+        pages = [('homepage', self.soup)] if self.soup else []
+        pages += list(self.extra_soups.items())
+        faq = job = org = crumb = content = 0
+        for key, s in pages:
+            if s is None:
+                continue
             t = set(self._soup_schema_types(s))
+            is_job_page = ('JobPosting' in t) or bool(self.JOB_PAGE_URL.search(key))
+            if not is_job_page:
+                content += 1
             if t & {'FAQPage', 'QAPage'}:
                 faq += 1
             if 'JobPosting' in t:
@@ -656,9 +669,11 @@ class CareerSiteGrader:
                 org += 1
             if 'BreadcrumbList' in t:
                 crumb += 1
-        checked = len(soups)
+        checked = len(pages)
         self.coverage = {
             'pages_checked': checked,
+            'content_pages': content,        # excludes dynamic job pages
+            'job_pages': checked - content,
             'total_pages': self.total_pages or checked,
             'faq_pages': faq,
             'jobposting_pages': job,
@@ -667,16 +682,21 @@ class CareerSiteGrader:
         }
         return self.coverage
 
-    def _coverage_phrase(self, count: int, label: str) -> str:
-        """e.g. 'FAQPage schema on 13 of 40 pages' (or '… of 40 sampled (212 in sitemap)')."""
+    def _coverage_phrase(self, count: int, label: str, content_only: bool = True) -> str:
+        """e.g. 'FAQPage schema on 13 of 40 content pages (212 in sitemap)'.
+        content_only excludes dynamic job pages from the denominator."""
         cov = self._get_coverage()
-        checked = cov['pages_checked']
+        denom = cov['content_pages'] if content_only else cov['pages_checked']
+        unit = 'content pages' if content_only else 'pages'
         total = cov['total_pages']
+        checked = cov['pages_checked']
+        if denom <= 0:
+            return f'{label} on 0 of 0 {unit}'
         if total and total <= checked:
-            return f'{label} on {count} of {total} pages'
+            return f'{label} on {count} of {denom} {unit}'
         if total and total > checked:
-            return f'{label} on {count} of {checked} pages sampled ({total} in sitemap)'
-        return f'{label} on {count} of {checked} pages scanned'
+            return f'{label} on {count} of {denom} {unit} sampled ({total} in sitemap)'
+        return f'{label} on {count} of {denom} {unit} scanned'
 
     def _find_schema_node(self, *type_names) -> Optional[dict]:
         wanted = {t.lower() for t in type_names}
@@ -1272,10 +1292,10 @@ class CareerSiteGrader:
         if has_faq_schema:
             faq_pts += 15
             faq_notes.append(self._coverage_phrase(faq_count, 'FAQPage schema') + ' ✓')
-            # Reward broader coverage; nudge if only a few pages have it.
-            checked = cov['pages_checked']
-            if checked >= 3 and faq_count <= max(1, checked // 4):
-                faq_notes.append('only a small share of pages — add FAQPage schema to more pages')
+            # Reward broader coverage; nudge if only a few CONTENT pages have it.
+            content = cov['content_pages']
+            if content >= 4 and faq_count <= max(1, content // 4):
+                faq_notes.append('only a small share of content pages — add FAQPage schema to more')
         else:
             faq_notes.append(self._coverage_phrase(0, 'No FAQPage schema') + ' — wrap your FAQ content in FAQPage JSON-LD')
         if faq_html or faq_heading:
@@ -2668,15 +2688,26 @@ class CareerSiteGrader:
         score += hint_pts; max_score += hint_max
 
         # --- Render-Blocking JS ---
-        blocking_js = [s for s in soup.find_all('script', src=True)
+        # Only scripts in <head> without defer/async actually block first paint.
+        # Scripts at the end of <body> (the recommended pattern) do NOT, so they
+        # must not be counted as render-blocking.
+        head = soup.find('head')
+        head_scripts = head.find_all('script', src=True) if head else []
+        blocking_js = [s for s in head_scripts
                        if not s.get('defer') and not s.get('async') and s.get('type') != 'module']
+        nb = len(blocking_js)
         block_max = 10 if self.mode == 'general' else 15
-        if len(blocking_js) == 0: pts, note = block_max, 'No render-blocking scripts ✓'
-        elif len(blocking_js) <= 2: pts, note = round(block_max * 0.67), f'{len(blocking_js)} blocking script(s)'
-        elif len(blocking_js) <= 5: pts, note = round(block_max * 0.33), f'{len(blocking_js)} blocking scripts'
-        else: pts, note = 0, f'{len(blocking_js)} blocking scripts — critical'
+        if nb == 0:
+            pts, note = block_max, 'No render-blocking scripts in <head> ✓'
+        elif nb <= 2:
+            pts, note = round(block_max * 0.8), f'{nb} render-blocking script(s) in <head> — add defer/async'
+        elif nb <= 5:
+            pts, note = round(block_max * 0.45), f'{nb} render-blocking scripts in <head> — defer/async these'
+        else:
+            pts, note = round(block_max * 0.15), f'{nb} render-blocking scripts in <head> — critical'
         checks.append({'name': 'Render-Blocking Scripts', 'weight': block_max, 'score': pts, 'max': block_max,
-                        'status': self._pts_status(pts, block_max), 'detail': note})
+                        'status': self._pts_status(pts, block_max), 'detail': note,
+                        'value': f'{nb} in <head>'})
         score += pts; max_score += block_max
 
         # --- General mode extras ---
@@ -3108,6 +3139,7 @@ class CareerSiteGrader:
             'Open Graph / Social Tags': 'Controls how your site looks when shared on LinkedIn/WhatsApp',
             'H1 Heading': 'Primary page signal for Google — tells search what the page is about',
             'Content Compression': 'Reduces page weight — faster loads, better Core Web Vitals',
+            'Render-Blocking Scripts': 'Scripts in <head> delay first paint — every blocked second loses candidates',
             'Job Search & Filters': 'Candidates expect instant, filterable search — no search = high bounce',
             'Call-to-Action Strength': 'Without clear CTAs candidates leave without converting',
             'DE&I Commitment': 'Growing factor in employer selection — affects talent pipeline diversity',
