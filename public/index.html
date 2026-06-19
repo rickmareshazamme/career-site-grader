@@ -1465,7 +1465,7 @@ async function submitLead(e) {
     const res = await fetch('/lead', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, url: _leadCtx.url, mode: _leadCtx.mode, overall: _leadCtx.overall, monitor })
+      body: JSON.stringify({ email, url: _leadCtx.url, mode: _leadCtx.mode, overall: _leadCtx.overall, monitor, report_id: (gradeData && gradeData.report_id) || '', grade: (gradeData && gradeData.grade) || '' })
     });
     const j = await res.json();
     if (!j.ok) { alert(j.error || 'Something went wrong.'); btn.disabled = false; return; }
@@ -1769,9 +1769,15 @@ function gradeAnother() {
 }
 
 function copyLink() {
-  const url = $('url-input').value || '';
-  let shareUrl = window.location.origin + '/?url=' + encodeURIComponent(url);
-  if (selectedMode) shareUrl += '&mode=' + encodeURIComponent(selectedMode);
+  // Prefer a persistent shareable report link (renders the exact saved result).
+  let shareUrl;
+  if (gradeData && gradeData.report_id) {
+    shareUrl = window.location.origin + '/r/' + gradeData.report_id;
+  } else {
+    const url = $('url-input').value || '';
+    shareUrl = window.location.origin + '/?url=' + encodeURIComponent(url);
+    if (selectedMode) shareUrl += '&mode=' + encodeURIComponent(selectedMode);
+  }
   navigator.clipboard.writeText(shareUrl).then(() => {
     const btn = document.querySelector('[onclick="copyLink()"]');
     const orig = btn.innerHTML;
@@ -1786,6 +1792,22 @@ function copyLink() {
 // AUTO-LOAD FROM URL PARAM
 // ════════════════════════════════════════════
 (function() {
+  // Shared report: /r/<id> renders the exact saved report without re-grading.
+  const shareMatch = window.location.pathname.match(/^\/r\/([A-Za-z0-9_-]+)$/);
+  if (shareMatch) {
+    selectedMode = null;
+    fetch('/api/report/' + encodeURIComponent(shareMatch[1]))
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(data => {
+        selectedMode = data.mode || 'recruitment';
+        gradeData = data;
+        hide('hero'); hide('loading');
+        renderResults(data);
+      })
+      .catch(() => { /* fall back to the normal hero */ });
+    return;
+  }
+
   const params = new URLSearchParams(window.location.search);
   const urlParam = params.get('url');
   const modeParam = params.get('mode');

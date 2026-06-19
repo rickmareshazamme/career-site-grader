@@ -71,6 +71,13 @@ def init_db():
                     created_at REAL,
                     PRIMARY KEY (url, mode)
                 );
+
+                CREATE TABLE IF NOT EXISTS reports (
+                    id TEXT PRIMARY KEY,
+                    url TEXT, mode TEXT,
+                    report_json TEXT,
+                    created_at REAL
+                );
                 """
             )
         return True
@@ -210,6 +217,47 @@ def get_cwv(url: str, mode: str) -> Optional[Dict]:
         cwv['stale'] = True
         cwv['measured_at'] = row['created_at']
         return cwv
+    except Exception:
+        return None
+
+
+def save_report(report_id: str, url: str, mode: str, report: Dict) -> bool:
+    if not _ENABLED:
+        return False
+    try:
+        with _LOCK, _connect() as conn:
+            conn.execute(
+                'INSERT INTO reports (id, url, mode, report_json, created_at) VALUES (?,?,?,?,?) '
+                'ON CONFLICT(id) DO NOTHING',
+                (report_id, url, mode, json.dumps(report), time.time()))
+        return True
+    except Exception:
+        return False
+
+
+def get_report(report_id: str) -> Optional[Dict]:
+    if not _ENABLED:
+        return None
+    try:
+        with _LOCK, _connect() as conn:
+            row = conn.execute('SELECT report_json FROM reports WHERE id=?', (report_id,)).fetchone()
+        return json.loads(row['report_json']) if row else None
+    except Exception:
+        return None
+
+
+def last_overall(domain: str, mode: str, before_latest: bool = True) -> Optional[int]:
+    """The previous overall score for a domain (second-most-recent), for digests."""
+    if not _ENABLED:
+        return None
+    try:
+        with _LOCK, _connect() as conn:
+            rows = conn.execute(
+                'SELECT overall FROM grades WHERE domain=? AND mode=? ORDER BY created_at DESC LIMIT 2',
+                (domain, mode)).fetchall()
+        if before_latest:
+            return rows[1]['overall'] if len(rows) >= 2 else None
+        return rows[0]['overall'] if rows else None
     except Exception:
         return None
 

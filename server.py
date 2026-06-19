@@ -4,15 +4,47 @@ import os
 import queue
 import threading
 import re
+import time
+import secrets
+from collections import defaultdict, deque
 from flask import Flask, request, Response, send_from_directory, jsonify
 from grader import CareerSiteGrader
 import db
+import emailer
 
 app = Flask(__name__, static_folder='public')
 db.init_db()
 
 VALID_MODES = ('recruitment', 'career_site', 'general')
 _EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+PUBLIC_BASE_URL = os.environ.get('PUBLIC_BASE_URL',
+                                 'https://career-site-grader-production.up.railway.app')
+
+# --- Simple in-memory per-IP rate limiting (per worker) ---
+_rl = defaultdict(deque)
+_rl_lock = threading.Lock()
+
+
+def _client_ip():
+    fwd = request.headers.get('X-Forwarded-For', '')
+    return fwd.split(',')[0].strip() if fwd else (request.remote_addr or 'unknown')
+
+
+def _rate_ok(bucket: str, limit: int, window: int = 3600) -> bool:
+    now = time.time()
+    key = f'{bucket}:{_client_ip()}'
+    with _rl_lock:
+        dq = _rl[key]
+        while dq and dq[0] < now - window:
+            dq.popleft()
+        if len(dq) >= limit:
+            return False
+        dq.append(now)
+        return True
+
+
+def _report_link(report_id):
+    return f'{PUBLIC_BASE_URL}/r/{report_id}' if report_id else PUBLIC_BASE_URL
 
 
 def _pillar_scores(complete_event):
@@ -46,6 +78,8 @@ def _persist_and_enrich(event, fallback_url, mode):
                 event['core_web_vitals'] = cached
     except Exception:
         pass
+    if not event.get('report_id'):
+        event['report_id'] = secrets.token_urlsafe(8)
     return event
 
 
@@ -101,6 +135,10 @@ def run_grader_in_thread(url: str, mode: str, competitors, q: queue.Queue):
                         event['comparison'] = await _build_comparison(competitors, mode, event)
                     except Exception:
                         pass
+                try:
+                    db.save_report(event['report_id'], event.get('url', url), mode, event)
+                except Exception:
+                    pass
             q.put(event)
         q.put(None)  # sentinel
 
@@ -127,6 +165,9 @@ def grade():
     mode = (request.args.get('mode') or '').strip()
     if mode not in VALID_MODES:
         return jsonify({'error': f'mode parameter required. Must be one of: {", ".join(VALID_MODES)}'}), 400
+
+    if not _rate_ok('grade', limit=40):
+        return jsonify({'error': 'Rate limit reached — please try again later.'}), 429
 
     # Optional competitor benchmarking (comma-separated URLs, max 3)
     raw_comp = (request.args.get('competitors') or '').strip()
@@ -191,7 +232,23 @@ def lead():
     monitoring = False
     if want_monitor and url and mode in VALID_MODES:
         monitoring = db.add_monitor(email, url, mode)
-    return jsonify({'ok': True, 'monitoring': monitoring})
+
+    # Email the report (best-effort; needs SENDGRID_API_KEY)
+    emailed = False
+    report_id = (data.get('report_id') or '').strip()
+    grade = (data.get('grade') or '').strip()
+    top_fixes = None
+    if report_id:
+        stored = db.get_report(report_id)
+        if stored:
+            overall = stored.get('overall_score', overall)
+            grade = stored.get('grade', grade)
+            es = stored.get('executive_summary') or {}
+            top_fixes = es.get('top_opportunities')
+    if emailer.enabled() and overall is not None:
+        emailed = emailer.send_report_email(email, url, mode, overall, grade,
+                                             _report_link(report_id), top_fixes)
+    return jsonify({'ok': True, 'monitoring': monitoring, 'emailed': emailed})
 
 
 @app.route('/api/history')
@@ -287,9 +344,29 @@ def api_grade():
     if not result or 'error' in (result or {}):
         return jsonify(result or {'error': 'no result'}), 502
     _persist_and_enrich(result, url, mode)
+    try:
+        db.save_report(result['report_id'], result.get('url', url), mode, result)
+    except Exception:
+        pass
     resp = jsonify(result)
     resp.headers['Access-Control-Allow-Origin'] = '*'
     return resp
+
+
+@app.route('/api/report/<report_id>')
+def api_report(report_id):
+    report = db.get_report(report_id)
+    if not report:
+        return jsonify({'error': 'not found'}), 404
+    resp = jsonify(report)
+    resp.headers['Access-Control-Allow-Origin'] = '*'
+    return resp
+
+
+@app.route('/r/<report_id>')
+def shared_report(report_id):
+    # Serves the SPA; the front-end detects /r/<id> and loads the stored report.
+    return send_from_directory('public', 'index.html')
 
 
 @app.route('/cron/rescore')
@@ -309,16 +386,23 @@ def cron_rescore():
         out = []
         for m in monitors:
             try:
+                domain = ''
                 g = CareerSiteGrader(m['url'], mode=m['mode'], light=True)
                 final = None
                 async for ev in g.grade():
                     if ev.get('type') == 'complete':
                         final = ev
                 if final:
-                    db.save_grade(final.get('url', m['url']), final.get('domain', ''), m['mode'],
+                    domain = final.get('domain', '')
+                    previous = db.last_overall(domain, m['mode'], before_latest=False)
+                    db.save_grade(final.get('url', m['url']), domain, m['mode'],
                                   final.get('overall_score', 0), final.get('grade', ''),
                                   _pillar_scores(final))
                     db.mark_monitor_run(m['id'])
+                    if emailer.enabled():
+                        emailer.send_monitor_digest(
+                            m['email'], m['url'], final.get('overall_score', 0),
+                            final.get('grade', ''), previous, _report_link(None))
                     out.append({'url': m['url'], 'overall': final.get('overall_score')})
             except Exception as e:
                 out.append({'url': m['url'], 'error': str(e)})
@@ -329,6 +413,53 @@ def cron_rescore():
     finally:
         loop.close()
     return jsonify({'rescored': len(results), 'results': results})
+
+
+SEED_SITES = [
+    'roberthalf.com', 'hays.com', 'michaelpage.com', 'adecco.com', 'randstad.com',
+    'manpower.com', 'kellyservices.com', 'roberthalf.co.uk', 'reed.co.uk', 'morganmckinley.com',
+    'hudson.com', 'gartner.com/en/careers', 'pagepersonnel.co.uk', 'sthree.com', 'roberthalf.com.au',
+    'hays.com.au', 'seek.com.au', 'allegisgroup.com', 'kornferry.com', 'spencerstuart.com',
+    'aerotek.com', 'teksystems.com', 'experis.com', 'roberthalf.de', 'gigroom.com',
+]
+
+
+@app.route('/cron/seed')
+def cron_seed():
+    """Populate the benchmark dataset by light-grading a curated list so
+    percentile benchmarking becomes meaningful. Protect with ?token=CRON_TOKEN."""
+    token = (request.args.get('token') or '').strip()
+    expected = os.environ.get('CRON_TOKEN', '')
+    if not expected or token != expected:
+        return jsonify({'error': 'unauthorized'}), 401
+    mode = (request.args.get('mode') or 'recruitment').strip()
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    async def seed():
+        done = []
+        for site in SEED_SITES:
+            try:
+                g = CareerSiteGrader(site, mode=mode, light=True)
+                final = None
+                async for ev in g.grade():
+                    if ev.get('type') == 'complete':
+                        final = ev
+                if final:
+                    db.save_grade(final.get('url', site), final.get('domain', ''), mode,
+                                  final.get('overall_score', 0), final.get('grade', ''),
+                                  _pillar_scores(final))
+                    done.append({'site': site, 'overall': final.get('overall_score')})
+            except Exception as e:
+                done.append({'site': site, 'error': str(e)[:60]})
+        return done
+
+    try:
+        results = loop.run_until_complete(seed())
+    finally:
+        loop.close()
+    return jsonify({'seeded': len([r for r in results if 'overall' in r]), 'results': results})
 
 
 @app.route('/stats')

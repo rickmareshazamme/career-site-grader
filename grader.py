@@ -1288,6 +1288,10 @@ class CareerSiteGrader:
                             'status': self._pts_status(a11y_pts, 15), 'detail': f'{lang_note} | {alt_note}'})
             score += a11y_pts; max_score += 15
 
+            sem = self._semantic_a11y_check(soup)
+            checks.append(sem)
+            score += sem['score']; max_score += sem['max']
+
             # --- Apply Flow (20pts max) ---
             sig = self._recruitment_signals()
             field_count = sig['field_count']
@@ -1424,6 +1428,10 @@ class CareerSiteGrader:
                             'status': self._pts_status(a11y_pts, 15), 'detail': f'{lang_note} | {alt_note}'})
             score += a11y_pts; max_score += 15
 
+            sem = self._semantic_a11y_check(soup)
+            checks.append(sem)
+            score += sem['score']; max_score += sem['max']
+
             # --- Apply & Job Search (multi-page + widget-aware) ---
             sig = self._recruitment_signals()
             apply_pts = 0; apply_notes = []
@@ -1516,6 +1524,70 @@ class CareerSiteGrader:
             'checks': checks,
             'summary': self._cx_summary(pct),
         }
+
+    def _semantic_a11y_check(self, soup: BeautifulSoup) -> Dict:
+        """Deeper static accessibility signals beyond alt/lang: semantic landmarks,
+        form label association, descriptive link text, and heading order."""
+        pts = 0; notes = []; mx = 12
+
+        # 1. Landmarks (3)
+        has_main = bool(soup.find('main') or soup.find(attrs={'role': 'main'}))
+        has_nav = bool(soup.find('nav') or soup.find(attrs={'role': 'navigation'}))
+        has_header = bool(soup.find('header') or soup.find(attrs={'role': 'banner'}))
+        landmarks = sum([has_main, has_nav, has_header])
+        if landmarks >= 3:
+            pts += 3; notes.append('Semantic landmarks (main/nav/header) ✓')
+        elif landmarks >= 1:
+            pts += 1; notes.append(f'{landmarks}/3 landmarks — add <main>/<nav>/<header>')
+        else:
+            notes.append('No semantic landmarks — screen readers can\'t skip to regions')
+
+        # 2. Form label association (3)
+        inputs = [i for i in soup.find_all(['input', 'select', 'textarea'])
+                  if i.get('type', 'text') not in ('hidden', 'submit', 'button', 'reset', 'image')]
+        if inputs:
+            label_fors = {l.get('for') for l in soup.find_all('label') if l.get('for')}
+            labelled = 0
+            for i in inputs:
+                if (i.get('aria-label') or i.get('aria-labelledby') or
+                        (i.get('id') and i.get('id') in label_fors) or i.find_parent('label')):
+                    labelled += 1
+            ratio = labelled / len(inputs)
+            if ratio >= 0.9:
+                pts += 3; notes.append(f'{labelled}/{len(inputs)} form fields labelled ✓')
+            elif ratio >= 0.5:
+                pts += 1; notes.append(f'Only {labelled}/{len(inputs)} fields properly labelled')
+            else:
+                notes.append(f'{labelled}/{len(inputs)} fields labelled — most inputs inaccessible')
+        else:
+            pts += 3
+
+        # 3. Descriptive link text (3)
+        VAGUE = re.compile(r'^\s*(click here|here|read more|more|learn more|link|this)\s*$', re.I)
+        links = soup.find_all('a', href=True)
+        vague = [a for a in links if VAGUE.match(a.get_text(' ').strip())]
+        if links:
+            if len(vague) == 0:
+                pts += 3; notes.append('Descriptive link text ✓')
+            elif len(vague) <= 2:
+                pts += 1; notes.append(f'{len(vague)} vague links ("click here") — describe the destination')
+            else:
+                notes.append(f'{len(vague)} vague link labels hurt screen-reader & SEO context')
+        else:
+            pts += 3
+
+        # 4. Heading order — no skipped levels (3)
+        levels = [int(h.name[1]) for h in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])]
+        skipped = any(levels[i] - levels[i - 1] > 1 for i in range(1, len(levels)))
+        if not levels:
+            notes.append('No headings to evaluate order')
+        elif not skipped:
+            pts += 3; notes.append('Logical heading order ✓')
+        else:
+            pts += 1; notes.append('Heading levels skipped (e.g. H2→H4) — keep them sequential')
+
+        return {'name': 'Semantic HTML & ARIA', 'weight': mx, 'score': pts, 'max': mx,
+                'status': self._pts_status(pts, mx), 'detail': ' | '.join(notes)}
 
     def _detect_ats(self) -> Dict:
         """Detect ATS platforms from HTML content and iframe sources."""
@@ -1972,6 +2044,10 @@ class CareerSiteGrader:
         checks.append({'name': 'Accessibility (WCAG)', 'weight': 20, 'score': a11y_pts, 'max': 20,
                         'status': self._pts_status(a11y_pts, 20), 'detail': ' | '.join(a11y_notes)})
         score += a11y_pts; max_score += 20
+
+        sem = self._semantic_a11y_check(soup)
+        checks.append(sem)
+        score += sem['score']; max_score += sem['max']
 
         # --- Navigation (12pts) ---
         nav_tags = soup.find_all('nav')
@@ -2579,6 +2655,7 @@ class CareerSiteGrader:
         'Crawlable Content (JS-render)': 'Most AI crawlers do NOT run JavaScript, so any content (including your job listings) that only appears after client-side rendering is invisible to them. Ensure the important text exists in the raw HTML via server-side rendering, pre-rendering or a static snapshot. Shazamme v2 feed_cache serves a static job snapshot for exactly this.',
         'Mobile Readiness': '60%+ of job searches are on mobile. Add a responsive <meta name="viewport" content="width=device-width, initial-scale=1"> and test on a phone. Modern site builders handle this — confirm the viewport tag is present.',
         'Accessibility (WCAG)': 'Accessible sites reach more candidates and reduce legal risk. Set a lang attribute on <html>, add descriptive alt text to every meaningful image, ensure colour contrast, and provide a skip-to-content link.',
+        'Semantic HTML & ARIA': 'Helps assistive tech (and AI parsers) understand your page. Use semantic landmarks (<main>, <nav>, <header>, <footer>), associate every form field with a <label> (or aria-label), write descriptive link text instead of "click here", and keep heading levels in order (don\'t jump H2→H4).',
         'Apply Flow & Job Search': 'The core candidate journey: finding a role and applying. Provide an obvious job search on /job-results and a clear Apply button on /job-detail, and keep the application form short (≤5 fields). If your board is a widget, make sure the rendered apply button is reachable. Shazamme delivers a mobile-first, ATS-integrated apply flow.',
         'ATS Platform Detection': 'An Applicant Tracking System is needed for candidates to actually complete and for you to manage applications. Integrate your ATS (Bullhorn, JobAdder, Greenhouse, etc.) so applies flow into your hiring pipeline instead of an email inbox.',
         'Navigation & Structure': 'Clear navigation helps users and search engines. Use a semantic <nav> element, a logical menu, and breadcrumbs on deep pages so people (and crawlers) always know where they are.',
