@@ -17,6 +17,6 @@ jobs:
             echo "CRON_TOKEN secret not set — skipping."; exit 0
           fi
           code=$(curl -s -o /tmp/out.json -w "%{http_code}" --max-time 600 \
-            "https://career-site-grader-production.up.railway.app/cron/rescore?token=${{ secrets.CRON_TOKEN }}")
+            "https://webgrader.shazamme.com/cron/rescore?token=${{ secrets.CRON_TOKEN }}")
           echo "HTTP $code"; cat /tmp/out.json
           test "$code" = "200"
