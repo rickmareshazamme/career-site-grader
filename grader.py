@@ -8,6 +8,7 @@ import ssl
 from urllib.parse import urlparse, urljoin
 from bs4 import BeautifulSoup
 from typing import AsyncGenerator, Dict, Any, List, Optional
+import renderer
 
 
 class CareerSiteGrader:
@@ -58,6 +59,11 @@ class CareerSiteGrader:
         self._schema_objects: Optional[List[dict]] = None
         self._schema_parse_errors = 0
         self._rec_signals: Optional[Dict] = None
+        # Headless-rendered DOM (post-JS), populated when ENABLE_HEADLESS=1
+        self.rendered_html = ''
+        self.rendered_soup: Optional[BeautifulSoup] = None
+        # Real off-site authority (backlinks), populated when a provider key is set
+        self.authority: Optional[Dict] = None
 
     def _normalize_url(self, url: str) -> str:
         url = url.strip()
@@ -90,7 +96,8 @@ class CareerSiteGrader:
 
         # Parallel secondary fetches
         yield {'type': 'status', 'message': 'Checking AI crawler access and robots.txt...', 'progress': 18}
-        secondary_fetches = [self._fetch_robots_txt(), self._check_llms_txt(), self._check_llm_info()]
+        secondary_fetches = [self._fetch_robots_txt(), self._check_llms_txt(),
+                             self._check_llm_info(), self._fetch_authority()]
         if self.mode == 'general':
             secondary_fetches.append(self._check_sitemap())
         else:
@@ -98,6 +105,16 @@ class CareerSiteGrader:
             # dedicated routes — fetch them so detection isn't a false negative.
             secondary_fetches.append(self._fetch_recruitment_pages())
         await asyncio.gather(*secondary_fetches)
+
+        # Optional headless render — see what AI crawlers (no JS) cannot.
+        if renderer.enabled():
+            static_text_len = len(self.soup.get_text(' ', strip=True)) if self.soup else 0
+            if static_text_len < 2500:  # only bother for thin/JS-heavy pages
+                yield {'type': 'status', 'message': 'Rendering JavaScript to capture client-side content...', 'progress': 22}
+                rendered = await renderer.render_html(self.url)
+                if rendered:
+                    self.rendered_html = rendered
+                    self.rendered_soup = BeautifulSoup(rendered, 'html.parser')
 
         if self.mode == 'recruitment':
             pillars_config = [
@@ -173,6 +190,7 @@ class CareerSiteGrader:
             'executive_summary': executive_summary,
             'core_web_vitals': self.pagespeed,
             'cwv_attempted': self.cwv_attempted,
+            'authority': self.authority,
             'mode': self.mode,
             'progress': 100,
         }
@@ -203,6 +221,64 @@ class CareerSiteGrader:
         except Exception as e:
             self.errors.append(str(e))
             return False
+
+    async def _fetch_authority(self):
+        """Real off-site authority (backlinks / referring domains / domain rank)
+        from a backlink provider. Provider-agnostic and env-keyed; degrades to
+        None when no credentials are configured.
+
+        Supported (set whichever you have):
+          - DataForSEO:  DATAFORSEO_LOGIN + DATAFORSEO_PASSWORD
+          - Moz Links:   MOZ_TOKEN  (API v2 bearer)
+        """
+        import base64
+        domain = self.parsed.netloc.lower().lstrip('www.')
+        try:
+            df_login = os.environ.get('DATAFORSEO_LOGIN', '')
+            df_pass = os.environ.get('DATAFORSEO_PASSWORD', '')
+            moz_token = os.environ.get('MOZ_TOKEN', '')
+            timeout = aiohttp.ClientTimeout(total=15)
+
+            if df_login and df_pass:
+                auth = base64.b64encode(f'{df_login}:{df_pass}'.encode()).decode()
+                url = 'https://api.dataforseo.com/v3/backlinks/summary/live'
+                payload = [{'target': domain, 'internal_list_limit': 1,
+                            'backlinks_status_type': 'live'}]
+                async with aiohttp.ClientSession(timeout=timeout) as sess:
+                    async with sess.post(url, json=payload,
+                                         headers={'Authorization': f'Basic {auth}'}) as resp:
+                        if resp.status != 200:
+                            return
+                        data = await resp.json()
+                res = (((data.get('tasks') or [{}])[0].get('result')) or [{}])[0]
+                if res:
+                    self.authority = {
+                        'provider': 'DataForSEO',
+                        'rank': res.get('rank'),
+                        'backlinks': res.get('backlinks'),
+                        'referring_domains': res.get('referring_domains'),
+                    }
+                return
+
+            if moz_token:
+                url = 'https://lsapi.seomoz.com/v2/url_metrics'
+                async with aiohttp.ClientSession(timeout=timeout) as sess:
+                    async with sess.post(url, json={'targets': [domain]},
+                                         headers={'Authorization': f'Bearer {moz_token}'}) as resp:
+                        if resp.status != 200:
+                            return
+                        data = await resp.json()
+                res = (data.get('results') or [{}])[0]
+                if res:
+                    self.authority = {
+                        'provider': 'Moz',
+                        'rank': res.get('domain_authority'),
+                        'backlinks': res.get('external_pages_to_root_domain'),
+                        'referring_domains': res.get('root_domains_to_root_domain'),
+                    }
+                return
+        except Exception:
+            self.authority = None
 
     async def _fetch_robots_txt(self):
         try:
@@ -490,8 +566,12 @@ class CareerSiteGrader:
             return self._rec_signals
 
         soups = self._all_soups()
+        if self.rendered_soup is not None:
+            soups = soups + [self.rendered_soup]
         combined_text = self._combined_text()
         combined_html = self._combined_html()
+        if self.rendered_html:
+            combined_html = combined_html + ' ' + self.rendered_html.lower()
 
         apply_btns, apply_links, filter_els = [], [], []
         search_box = None
@@ -1120,6 +1200,21 @@ class CareerSiteGrader:
             ent_notes.append('No named people / about page — weak E-E-A-T')
         if accreditation:
             ent_pts += 2; ent_notes.append('Accreditation / credentials ✓')
+        # Real off-site authority (backlinks) when a provider key is configured
+        if self.authority:
+            rank = self.authority.get('rank')
+            refdoms = self.authority.get('referring_domains')
+            bl = self.authority.get('backlinks')
+            prov = self.authority.get('provider', '')
+            parts = []
+            if rank is not None:
+                parts.append(f'domain rank {rank}')
+            if refdoms is not None:
+                parts.append(f'{refdoms:,} referring domains')
+            if bl is not None:
+                parts.append(f'{bl:,} backlinks')
+            if parts:
+                ent_notes.append(f'Authority ({prov}): {", ".join(parts)} ✓')
         ent_pts = min(ent_pts, ent_max)
         checks.append({'name': 'Entity & Authority', 'weight': ent_max, 'score': ent_pts, 'max': ent_max,
                         'status': self._pts_status(ent_pts, ent_max),
@@ -1215,6 +1310,15 @@ class CareerSiteGrader:
             crawl_pts += 4
         if is_duda_spa and text_len < 1500:
             crawl_notes.append('Duda widget content is client-rendered — ensure a static/pre-rendered snapshot exists')
+        # Headless evidence: how much content only appears after JS runs
+        if self.rendered_soup is not None:
+            rendered_len = len(self.rendered_soup.get_text(' ', strip=True))
+            if rendered_len > text_len * 1.5 and rendered_len - text_len > 1000:
+                hidden_pct = round((rendered_len - text_len) / rendered_len * 100)
+                crawl_notes.append(
+                    f'Headless render confirms {hidden_pct}% of content ({rendered_len:,} chars rendered '
+                    f'vs {text_len:,} static) is JS-injected — invisible to AI crawlers')
+                crawl_pts = min(crawl_pts, round(crawl_max * 0.3))
         crawl_pts = min(crawl_pts, crawl_max)
         checks.append({'name': 'Crawlable Content (JS-render)', 'weight': crawl_max, 'score': crawl_pts, 'max': crawl_max,
                         'status': self._pts_status(crawl_pts, crawl_max), 'detail': ' | '.join(crawl_notes)})
