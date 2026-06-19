@@ -232,7 +232,20 @@ class CareerSiteGrader:
           - Moz Links:   MOZ_TOKEN  (API v2 bearer)
         """
         import base64
-        domain = self.parsed.netloc.lower().lstrip('www.')
+        domain = self.parsed.netloc.lower()
+        if domain.startswith('www.'):
+            domain = domain[4:]
+
+        # Cache first — repeat grades / monitoring / competitors don't re-charge.
+        try:
+            import db as _db
+            cached = _db.get_authority(domain)
+            if cached:
+                self.authority = cached
+                return
+        except Exception:
+            _db = None
+
         try:
             df_login = os.environ.get('DATAFORSEO_LOGIN', '')
             df_pass = os.environ.get('DATAFORSEO_PASSWORD', '')
@@ -258,6 +271,7 @@ class CareerSiteGrader:
                         'backlinks': res.get('backlinks'),
                         'referring_domains': res.get('referring_domains'),
                     }
+                    self._cache_authority(_db, domain)
                 return
 
             if moz_token:
@@ -276,9 +290,17 @@ class CareerSiteGrader:
                         'backlinks': res.get('external_pages_to_root_domain'),
                         'referring_domains': res.get('root_domains_to_root_domain'),
                     }
+                    self._cache_authority(_db, domain)
                 return
         except Exception:
             self.authority = None
+
+    def _cache_authority(self, _db, domain):
+        try:
+            if _db and self.authority:
+                _db.save_authority(domain, self.authority)
+        except Exception:
+            pass
 
     async def _fetch_robots_txt(self):
         try:

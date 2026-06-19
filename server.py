@@ -101,6 +101,7 @@ async def _grade_competitor(url: str, mode: str) -> dict:
             'overall_score': final['overall_score'],
             'grade': final['grade'],
             'pillars': {k: v['score'] for k, v in final['pillars'].items()},
+            'authority': final.get('authority'),
         }
     except Exception as e:
         return {'url': url, 'error': str(e)}
@@ -113,6 +114,7 @@ async def _build_comparison(competitor_urls, mode, target_event) -> dict:
         'overall_score': target_event['overall_score'],
         'grade': target_event['grade'],
         'pillars': {k: v['score'] for k, v in target_event['pillars'].items()},
+        'authority': target_event.get('authority'),
     }
     scored = [r for r in results if 'overall_score' in r]
     rank = 1 + sum(1 for r in scored if r['overall_score'] > target['overall_score'])

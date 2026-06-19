@@ -1385,7 +1385,7 @@ function renderResults(data) {
   window.scrollTo({ top: 0, behavior: 'smooth' });
 
   // Benchmark percentile + history, lead capture
-  renderBenchmark(data.benchmark, data.history);
+  renderBenchmark(data.benchmark, data.history, data.authority);
   setupLeadCapture(data);
 
   // Executive summary, competitor benchmark, Core Web Vitals
@@ -1407,14 +1407,20 @@ function renderResults(data) {
   }
 }
 
-function renderBenchmark(bench, hist) {
+function renderBenchmark(bench, hist, authority) {
   const line = $('benchmark-line');
   let html = '';
   if (bench && bench.ready) {
     const beats = bench.beats_pct;
-    const verb = beats >= 50 ? 'Ahead of' : 'Behind — you beat only';
     html += `<span class="bm-pill">Beats <strong>${beats}%</strong> of ${bench.sample.toLocaleString()} graded sites</span>`;
     html += `<span class="bm-sub">Category average: ${bench.average}</span>`;
+  }
+  if (authority && (authority.rank != null || authority.referring_domains != null)) {
+    const parts = [];
+    if (authority.rank != null) parts.push(`rank ${authority.rank}`);
+    if (authority.referring_domains != null) parts.push(`${authority.referring_domains.toLocaleString()} ref. domains`);
+    if (authority.backlinks != null) parts.push(`${authority.backlinks.toLocaleString()} backlinks`);
+    html += `<span class="bm-pill" style="background:rgba(245,158,11,0.14);border-color:rgba(245,158,11,0.3)">Authority: ${parts.join(' · ')}</span>`;
   }
   if (hist && hist.length >= 2) {
     html += sparkline(hist);
@@ -1609,18 +1615,25 @@ function renderComparison(comp, pillars) {
   const rows = [t, ...comp.competitors];
   const pillarKeys = Object.keys(pillars);
   const pillarNames = pillarKeys.map(k => pillars[k].name);
-  const head = `<th>Site</th><th>Overall</th>` + pillarNames.map(n => `<th>${escHtml(n.split(' ')[0])}</th>`).join('');
+  // Only show the Authority column if at least one row has authority data
+  const hasAuthority = rows.some(r => r.authority && r.authority.referring_domains != null);
+  const head = `<th>Site</th><th>Overall</th>` + pillarNames.map(n => `<th>${escHtml(n.split(' ')[0])}</th>`).join('')
+    + (hasAuthority ? `<th>Ref. domains</th>` : '');
   const bodyRows = rows.map((r, idx) => {
     const isTarget = idx === 0;
-    if (r.error) return `<tr class="${isTarget?'cmp-target':''}"><td>${escHtml(r.domain || r.url)}</td><td colspan="${pillarKeys.length+1}" class="cmp-err">Could not analyse: ${escHtml(r.error)}</td></tr>`;
+    const span = pillarKeys.length + 1 + (hasAuthority ? 1 : 0);
+    if (r.error) return `<tr class="${isTarget?'cmp-target':''}"><td>${escHtml(r.domain || r.url)}</td><td colspan="${span}" class="cmp-err">Could not analyse: ${escHtml(r.error)}</td></tr>`;
     const cells = pillarKeys.map(k => {
       const v = r.pillars ? r.pillars[k] : null;
       return `<td style="color:${v==null?'#64748b':gradeColor(v)}">${v==null?'—':v}</td>`;
     }).join('');
+    const authCell = hasAuthority
+      ? `<td>${r.authority && r.authority.referring_domains != null ? r.authority.referring_domains.toLocaleString() : '—'}</td>`
+      : '';
     return `<tr class="${isTarget?'cmp-target':''}">
       <td>${isTarget?'<strong>'+escHtml(r.domain)+' (you)</strong>':escHtml(r.domain||r.url)}</td>
       <td><strong style="color:${gradeColor(r.overall_score)}">${r.overall_score}</strong> ${escHtml(r.grade||'')}</td>
-      ${cells}</tr>`;
+      ${cells}${authCell}</tr>`;
   }).join('');
   const rankNote = comp.rank && comp.field_size
     ? `<div class="cmp-rank">You rank <strong>#${comp.rank}</strong> of ${comp.field_size} on overall score.</div>` : '';

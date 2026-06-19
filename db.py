@@ -78,6 +78,12 @@ def init_db():
                     report_json TEXT,
                     created_at REAL
                 );
+
+                CREATE TABLE IF NOT EXISTS authority (
+                    domain TEXT PRIMARY KEY,
+                    data_json TEXT,
+                    created_at REAL
+                );
                 """
             )
         return True
@@ -258,6 +264,38 @@ def last_overall(domain: str, mode: str, before_latest: bool = True) -> Optional
         if before_latest:
             return rows[1]['overall'] if len(rows) >= 2 else None
         return rows[0]['overall'] if rows else None
+    except Exception:
+        return None
+
+
+def save_authority(domain: str, data: Dict) -> bool:
+    """Cache off-site authority per domain so repeat grades / monitoring /
+    competitor lookups don't re-charge the backlink provider."""
+    if not _ENABLED or not data:
+        return False
+    try:
+        with _LOCK, _connect() as conn:
+            conn.execute(
+                'INSERT INTO authority (domain, data_json, created_at) VALUES (?,?,?) '
+                'ON CONFLICT(domain) DO UPDATE SET data_json=excluded.data_json, created_at=excluded.created_at',
+                (domain, json.dumps(data), time.time()))
+        return True
+    except Exception:
+        return False
+
+
+def get_authority(domain: str, max_age_days: float = 7) -> Optional[Dict]:
+    if not _ENABLED:
+        return None
+    try:
+        with _LOCK, _connect() as conn:
+            row = conn.execute('SELECT data_json, created_at FROM authority WHERE domain=?',
+                               (domain,)).fetchone()
+        if not row:
+            return None
+        if time.time() - row['created_at'] > max_age_days * 86400:
+            return None  # stale — refetch
+        return json.loads(row['data_json'])
     except Exception:
         return None
 
