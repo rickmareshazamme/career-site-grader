@@ -540,6 +540,22 @@ class CareerSiteGrader:
         soups.extend(self.extra_soups.values())
         return soups
 
+    def _find_all_pages(self, *args, **kwargs) -> List:
+        """find_all aggregated across every scanned page."""
+        out: List = []
+        for s in self._all_soups():
+            out += s.find_all(*args, **kwargs)
+        return out
+
+    def _best_content_soup(self) -> Optional[BeautifulSoup]:
+        """The richest content page (most visible text). Homepages are thin visual
+        heroes; AI extraction / depth lives on deep content pages, so structure,
+        depth and AEO are best judged on the strongest page, not the homepage."""
+        soups = self._all_soups()
+        if not soups:
+            return self.soup
+        return max(soups, key=lambda s: len(s.get_text(' ', strip=True)))
+
     def _combined_html(self) -> str:
         return ' '.join([self.html] + list(self.extra_html.values())).lower()
 
@@ -771,7 +787,8 @@ class CareerSiteGrader:
 
     JOBPOSTING_REQUIRED = ['title', 'datePosted', 'hiringOrganization', 'jobLocation', 'description']
     JOBPOSTING_RICH = ['validThrough', 'employmentType', 'baseSalary',
-                       'jobLocationType', 'applicantLocationRequirements', 'directApply']
+                       'jobLocationType', 'applicantLocationRequirements',
+                       'identifier', 'educationRequirements', 'experienceRequirements']
 
     def _validate_jobposting(self) -> Optional[Dict]:
         node = self._find_schema_node('JobPosting')
@@ -873,15 +890,17 @@ class CareerSiteGrader:
         title_tag = soup.find('title')
         title_text = title_tag.get_text().strip() if title_tag else ''
         title_len = len(title_text)
+        # Google truncates by PIXEL width (~600px), not a hard char count, and
+        # rewrites titles often — so use wide, forgiving bands.
         if title_text:
-            if 30 <= title_len <= 60:
-                pts, note = 15, f'Title is {title_len} chars — perfect length (30-60)'
-            elif 61 <= title_len <= 70:
-                pts, note = 11, f'Title is {title_len} chars — slightly long, may truncate in SERPs'
-            elif title_len < 30:
-                pts, note = 8, f'Title is {title_len} chars — too short, aim for 30-60'
+            if 20 <= title_len <= 65:
+                pts, note = 15, f'Title is {title_len} chars — good length'
+            elif 66 <= title_len <= 75:
+                pts, note = 13, f'Title is {title_len} chars — may truncate depending on character width'
+            elif title_len < 20:
+                pts, note = 9, f'Title is {title_len} chars — quite short, add context'
             else:
-                pts, note = 6, f'Title is {title_len} chars — too long, Google truncates at ~60'
+                pts, note = 11, f'Title is {title_len} chars — likely truncates in SERPs; front-load key terms'
         else:
             pts, note = 0, 'No <title> tag — this is a critical SEO failure'
         checks.append({'name': 'Title Tag', 'weight': 15, 'score': pts, 'max': 15,
@@ -893,15 +912,15 @@ class CareerSiteGrader:
         meta_desc = soup.find('meta', attrs={'name': re.compile(r'^description$', re.I)})
         desc_text = (meta_desc.get('content') or '').strip() if meta_desc else ''
         desc_len = len(desc_text)
+        # Snippet length is variable (~120-160 typical, often longer on desktop)
+        # and Google frequently rewrites it — wide bands, soft penalties.
         if desc_text:
-            if 120 <= desc_len <= 160:
-                pts, note = 12, f'Meta description {desc_len} chars — perfect length'
-            elif 80 <= desc_len < 120:
-                pts, note = 9, f'Meta description {desc_len} chars — a little short (aim for 120-160)'
-            elif desc_len > 160:
-                pts, note = 8, f'Meta description {desc_len} chars — will be truncated by Google'
+            if 70 <= desc_len <= 200:
+                pts, note = 12, f'Meta description {desc_len} chars — good length'
+            elif desc_len > 200:
+                pts, note = 10, f'Meta description {desc_len} chars — may be truncated; front-load the key message'
             else:
-                pts, note = 4, f'Meta description too short ({desc_len} chars)'
+                pts, note = 8, f'Meta description {desc_len} chars — a little short'
         else:
             pts, note = 0, 'No meta description — Google will auto-generate one (often badly)'
         checks.append({'name': 'Meta Description', 'weight': 12, 'score': pts, 'max': 12,
@@ -1266,6 +1285,9 @@ class CareerSiteGrader:
 
     async def _analyze_geo(self) -> Dict:
         soup = self.soup
+        # Structure/Depth/AEO are judged on the richest content page, not the
+        # (typically thin) homepage; entity/NAP signals scan all pages.
+        best = self._best_content_soup() or soup
         schema_types = self._get_schema_types()
         checks = []
         score = 0
@@ -1372,10 +1394,10 @@ class CareerSiteGrader:
                         'status': self._pts_status(faq_pts, 20), 'detail': ' | '.join(faq_notes)})
         score += faq_pts; max_score += 20
 
-        # --- Content Structure for AI ---
-        h2_count = len(soup.find_all('h2'))
-        h3_count = len(soup.find_all('h3'))
-        list_count = len(soup.find_all(['ul', 'ol']))
+        # --- Content Structure for AI (on the richest content page) ---
+        h2_count = len(best.find_all('h2'))
+        h3_count = len(best.find_all('h3'))
+        list_count = len(best.find_all(['ul', 'ol']))
         struct_pts = 0; struct_notes = []
         if h2_count >= 4:
             struct_pts += 8; struct_notes.append(f'{h2_count} H2 sections — excellent structure ✓')
@@ -1415,15 +1437,18 @@ class CareerSiteGrader:
                            'glassdoor', 'bloomberg.com', 'opencorporates.com')
         authority_refs = [u for u in same_as if any(h in u.lower() for h in AUTHORITY_HOSTS)]
 
-        # NAP: address + phone presence in schema or visible text
-        page_text = soup.get_text(' ')
+        # NAP: address + phone presence in schema or visible text (all pages —
+        # contact details usually live on /contact or the footer of inner pages)
+        page_text = self._combined_text()
         has_address = bool(org_node and org_node.get('address')) or \
             bool(re.search(r'\b\d{1,5}\s+\w+(\s\w+){0,3}\s+(street|st|road|rd|avenue|ave|lane|ln|drive|dr|suite|level|floor)\b', page_text, re.I))
         has_phone = bool(org_node and org_node.get('telephone')) or \
             bool(re.search(r'(\+?\d[\d\s().-]{7,}\d)', page_text))
 
-        # About / Team pages (E-E-A-T people)
-        about_link = soup.find('a', href=re.compile(r'about|who.?we.?are|our.?story|our.?team|meet.?the.?team|leadership|people', re.I))
+        # About / Team pages (E-E-A-T people) — any scanned page, or we fetched one
+        about_link = bool(self._find_all_pages('a', href=re.compile(
+            r'about|who.?we.?are|our.?story|our.?team|meet.?the.?team|leadership|people', re.I))) \
+            or any('about' in k for k in self.extra_soups)
 
         # Accreditation / professional bodies (recruitment authority)
         accreditation = bool(re.search(
@@ -1473,32 +1498,34 @@ class CareerSiteGrader:
                         'value': (', '.join(authority_refs[:3]) if authority_refs else None)})
         score += ent_pts; max_score += ent_max
 
-        # --- Content Depth ---
-        word_count = len(re.findall(r'\w+', soup.get_text()))
+        # --- Content Depth (richest content page) ---
+        word_count = len(re.findall(r'\w+', best.get_text()))
         if word_count >= 1000:
-            depth_pts, depth_note = 15, f'{word_count:,} words — excellent content depth for AI'
+            depth_pts, depth_note = 15, f'{word_count:,} words on your richest page — excellent depth for AI'
         elif word_count >= 500:
-            depth_pts, depth_note = 10, f'{word_count:,} words — decent depth'
+            depth_pts, depth_note = 10, f'{word_count:,} words on your richest page — decent depth'
         elif word_count >= 250:
-            depth_pts, depth_note = 5, f'{word_count:,} words — thin content'
+            depth_pts, depth_note = 5, f'{word_count:,} words — thin; build out deep content pages'
         else:
             depth_pts, depth_note = 0, f'Only {word_count:,} words — too thin for AI to answer questions about you'
         checks.append({'name': 'Content Depth', 'weight': 15, 'score': depth_pts, 'max': 15,
                         'status': self._pts_status(depth_pts, 15), 'detail': depth_note})
         score += depth_pts; max_score += 15
 
-        # --- AEO / Answer-Engine Readiness ---
+        # --- AEO / Answer-Engine Readiness (richest content page) ---
         # The content shape AI engines quote from: summary blocks, question
         # headings, direct answers, tables, quotable stats, freshness.
         aeo_max = 20
-        headings = soup.find_all(['h2', 'h3'])
+        headings = best.find_all(['h2', 'h3'])
         heading_txts = [h.get_text(' ').strip() for h in headings]
-        QUESTION_RE = re.compile(r'\?|\b(how|what|why|when|where|which|who|can|should|is|are|do|does|best)\b', re.I)
+        # A real question heading: starts with an interrogative, or ends with '?'.
+        QUESTION_RE = re.compile(r'\?\s*$|^\s*(how|what|why|when|where|which|who|can|should|does|do|are|is)\b', re.I)
         q_headings = [t for t in heading_txts if QUESTION_RE.search(t)]
+        page_text_body = best.get_text(' ')
         has_tldr = bool(re.search(
             r'tl;?dr|key takeaway|in summary|at a glance|quick answer|the short answer|summary\s*[:—-]',
-            page_text_body := soup.get_text(' '), re.I))
-        tables = soup.find_all('table')
+            page_text_body, re.I))
+        tables = best.find_all('table')
         stat_hits = re.findall(r'\b\d{1,3}(?:\.\d+)?\s?%|\b(?:£|\$|€)\s?\d', page_text_body)
         has_freshness = bool(re.search(r'last updated|updated on|reviewed on|published on|posted on', page_text_body, re.I)) \
             or bool(self._find_schema_node('Article', 'BlogPosting') and
@@ -1613,6 +1640,8 @@ class CareerSiteGrader:
                 content = (viewport.get('content') or '').lower()
                 if 'width=device-width' in content:
                     pts, note = mobile_max, 'Responsive viewport configured correctly ✓'
+                    if 'user-scalable=no' in content or re.search(r'maximum-scale=\s*[1-4]\b', content):
+                        pts = round(pts*0.7); note = 'Responsive, but blocks pinch-zoom (fails WCAG 1.4.4)'
                 else:
                     pts, note = 6, f'Viewport meta present but not optimal: {content[:60]}'
             else:
@@ -1688,7 +1717,7 @@ class CareerSiteGrader:
             score += ats_check['score']; max_score += ats_check['max']
 
             # --- Navigation (10pts) ---
-            nav_tags = soup.find_all('nav')
+            nav_tags = soup.find_all('nav') or soup.find_all(attrs={'role': 'navigation'})
             breadcrumb_html = bool(soup.find(class_=re.compile(r'breadcrumb', re.I)))
             schema_types = self._get_schema_types()
             has_breadcrumb_schema = 'BreadcrumbList' in schema_types
@@ -1727,6 +1756,8 @@ class CareerSiteGrader:
                 content = (viewport.get('content') or '').lower()
                 if 'width=device-width' in content:
                     pts, note = 15, 'Responsive viewport configured correctly ✓'
+                    if 'user-scalable=no' in content or re.search(r'maximum-scale=\s*[1-4]\b', content):
+                        pts = round(pts*0.7); note = 'Responsive, but blocks pinch-zoom (fails WCAG 1.4.4)'
                 else:
                     pts, note = 7, f'Viewport meta present but not optimal: {content[:60]}'
             else:
@@ -1785,7 +1816,7 @@ class CareerSiteGrader:
             score += apply_pts; max_score += 25
 
             # --- Navigation ---
-            nav_tags = soup.find_all('nav')
+            nav_tags = soup.find_all('nav') or soup.find_all(attrs={'role': 'navigation'})
             breadcrumb_html = bool(soup.find(class_=re.compile(r'breadcrumb', re.I)))
             schema_types = self._get_schema_types()
             has_breadcrumb_schema = 'BreadcrumbList' in schema_types
@@ -1954,11 +1985,11 @@ class CareerSiteGrader:
             'Pinpoint':        r'pinpointhq\.com',
         }
 
-        html_lower = self.html.lower()
-        # Also gather iframe src values
-        iframes = self.soup.find_all('iframe') if self.soup else []
-        iframe_srcs = ' '.join((f.get('src', '') or '') for f in iframes).lower()
-        combined = f'{html_lower} {iframe_srcs}'
+        # Scan every fetched page + the rendered DOM — ATS embeds are usually on
+        # the apply/job-detail page and frequently JS-injected.
+        iframe_srcs = ' '.join((f.get('src', '') or '')
+                               for s in self._all_soups() for f in s.find_all('iframe')).lower()
+        combined = f"{self._combined_html()} {(self.rendered_html or '').lower()} {iframe_srcs}"
 
         detected = []
         for name, pattern in ATS_PATTERNS.items():
@@ -2000,8 +2031,11 @@ class CareerSiteGrader:
         checks = []
         score = 0
         max_score = 0
-        page_text = soup.get_text().lower()
-        html_lower = self.html.lower()
+        # Brand content (culture, EVP, DE&I, stories) lives on /about, /benefits,
+        # /culture etc. — scan every fetched page, not just the homepage.
+        page_text = self._combined_text()
+        html_lower = self._combined_html()
+        all_soups = self._all_soups()
 
         if self.mode == 'career_site':
             # ----------------------------------------------------------------
@@ -2031,7 +2065,7 @@ class CareerSiteGrader:
             score += culture_pts; max_score += 20
 
             # --- Employee Stories & Testimonials (15pts) ---
-            story_els = soup.find_all(class_=re.compile(r'review|testimonial|story|quote|employee', re.I))
+            story_els = self._find_all_pages(class_=re.compile(r'review|testimonial|story|quote|employee', re.I))
             has_employee_story = bool(re.search(
                 r'testimonial|employee.?stor|our.?people.?say|what.?they.?say|hear.?from|their.?words',
                 page_text, re.I))
@@ -2050,7 +2084,7 @@ class CareerSiteGrader:
             score += emp_pts; max_score += 15
 
             # --- EVP & Pay Transparency (20pts) ---
-            salary_sig  = bool(re.search(r'salary|pay|compens|remunerat|\$|£|€|aud\b|wage|earn', page_text, re.I))
+            salary_sig  = bool(re.search(r'\b(salary|compensation|remuneration|wage|pay (range|scale|band|transparency))\b|[$£€]\s?\d', page_text, re.I))
             benefit_sig = bool(re.search(
                 r'benefit|perk|health|dental|vision|401k|pension|super(annuat)?|pto|vacation|holiday|'
                 r'\bremote\b|flexib|hybrid|parental|wellbeing|wellness', page_text, re.I))
@@ -2076,7 +2110,7 @@ class CareerSiteGrader:
             score += evp_pts; max_score += 20
 
             # --- DE&I Commitment (12pts) ---
-            dei_links = soup.find_all('a', href=re.compile(r'diversity|inclusion|dei|equity|belonging', re.I))
+            dei_links = self._find_all_pages('a', href=re.compile(r'diversity|inclusion|dei|equity|belonging', re.I))
             has_dei_page = bool(dei_links)
             dei_content_sig = bool(re.search(
                 r'\bdei\b|diversity|equity|inclusion|equal opportunit|eeo|belonging|erg\b|'
@@ -2096,8 +2130,8 @@ class CareerSiteGrader:
             score += dei_pts; max_score += 12
 
             # --- Video Content (10pts) ---
-            videos = soup.find_all('video')
-            iframes = soup.find_all('iframe')
+            videos = self._find_all_pages('video')
+            iframes = self._find_all_pages('iframe')
             yt_vimeo = [i for i in iframes if re.search(r'youtube|vimeo|loom|wistia', i.get('src', ''), re.I)]
             has_video = bool(videos) or bool(yt_vimeo)
             video_pts = 10 if has_video else 0
@@ -2127,10 +2161,12 @@ class CareerSiteGrader:
             platforms = ['linkedin', 'twitter', 'x.com', 'facebook', 'instagram', 'youtube',
                          'glassdoor', 'indeed', 'tiktok']
             found_platforms = set()
-            for link in soup.find_all('a', href=True):
+            for link in self._find_all_pages('a', href=True):
                 href = (link.get('href') or '').lower()
                 for p in platforms:
-                    if p in href:
+                    if p == 'x.com':
+                        if re.search(r'//(www\.)?x\.com[/?]', href): found_platforms.add(p)
+                    elif p in href:
                         found_platforms.add(p)
             soc_pts = min(len(found_platforms) * 3, 15)
             soc_note = f'Social: {", ".join(found_platforms)} ✓' if found_platforms else 'No social media links found'
@@ -2144,7 +2180,7 @@ class CareerSiteGrader:
             # ----------------------------------------------------------------
 
             # --- Social Proof ---
-            review_els = soup.find_all(class_=re.compile(r'review|testimonial|rating|quote', re.I))
+            review_els = self._find_all_pages(class_=re.compile(r'review|testimonial|rating|quote', re.I))
             has_testimonial = bool(re.search(
                 r'testimonial|what.{1,20}(say|think)|our clients say|candidates say|heard from|they said',
                 page_text, re.I
@@ -2163,8 +2199,8 @@ class CareerSiteGrader:
             score += sp_pts; max_score += 20
 
             # --- Video Content ---
-            videos = soup.find_all('video')
-            iframes = soup.find_all('iframe')
+            videos = self._find_all_pages('video')
+            iframes = self._find_all_pages('iframe')
             yt_vimeo = [i for i in iframes if re.search(r'youtube|vimeo|loom|wistia', i.get('src', ''), re.I)]
             has_video = bool(videos) or bool(yt_vimeo)
             video_pts = 15 if has_video else 0
@@ -2175,7 +2211,7 @@ class CareerSiteGrader:
             score += video_pts; max_score += 15
 
             # --- EVP Signals ---
-            salary_sig  = bool(re.search(r'salary|pay|compens|remunerat|\$|£|€|aud\b|wage|earn', page_text, re.I))
+            salary_sig  = bool(re.search(r'\b(salary|compensation|remuneration|wage|pay (range|scale|band|transparency))\b|[$£€]\s?\d', page_text, re.I))
             benefit_sig = bool(re.search(
                 r'benefit|perk|health|dental|vision|401k|pension|super(annuat)?|pto|vacation|holiday|'
                 r'\bremote\b|flexib|hybrid|parental|wellbeing|wellness', page_text, re.I))
@@ -2217,10 +2253,12 @@ class CareerSiteGrader:
             platforms = ['linkedin', 'twitter', 'x.com', 'facebook', 'instagram', 'youtube',
                          'glassdoor', 'indeed', 'tiktok']
             found_platforms = set()
-            for link in soup.find_all('a', href=True):
+            for link in self._find_all_pages('a', href=True):
                 href = (link.get('href') or '').lower()
                 for p in platforms:
-                    if p in href:
+                    if p == 'x.com':
+                        if re.search(r'//(www\.)?x\.com[/?]', href): found_platforms.add(p)
+                    elif p in href:
                         found_platforms.add(p)
             soc_pts = min(len(found_platforms) * 3, 15)
             soc_note = f'Social: {", ".join(found_platforms)} ✓' if found_platforms else 'No social media links found'
@@ -2302,6 +2340,7 @@ class CareerSiteGrader:
         # --- Privacy / Cookie Policy (15pts) ---
         privacy_link = soup.find('a', href=re.compile(r'privacy|cookie|gdpr|data.?protection', re.I))
         cookie_banner = bool(soup.find(class_=re.compile(r'cookie|consent|gdpr', re.I))) or \
+                        bool(re.search(r'onetrust|cookiebot|osano|trustarc|quantcast|cookieyes|termly|usercentrics|cookie-?law', self.html.lower())) or \
                         bool(re.search(r'cookie.?consent|cookie.?banner|accept.?cookies', self.html.lower()))
         priv_pts = 0; priv_notes = []
         if privacy_link:
@@ -2316,7 +2355,7 @@ class CareerSiteGrader:
         score += priv_pts; max_score += 15
 
         # --- Mixed Content (10pts) ---
-        http_resources = soup.find_all(src=re.compile(r'^http://', re.I))
+        http_resources = soup.find_all(src=re.compile(r'^http://', re.I)) + soup.find_all('link', href=re.compile(r'^http://', re.I))
         if is_https and http_resources:
             pts = 0
             note = f'{len(http_resources)} HTTP resource(s) on HTTPS page — mixed content warning'
@@ -2361,6 +2400,8 @@ class CareerSiteGrader:
             content = (viewport.get('content') or '').lower()
             if 'width=device-width' in content:
                 pts, note = 15, 'Responsive viewport ✓'
+                if 'user-scalable=no' in content or re.search(r'maximum-scale=\s*[1-4]\b', content):
+                    pts = round(pts * 0.7); note = 'Responsive, but blocks pinch-zoom (fails WCAG 1.4.4)'
             else:
                 pts, note = 7, f'Viewport present but not optimal: {content[:60]}'
         else:
@@ -2396,7 +2437,7 @@ class CareerSiteGrader:
         score += sem['score']; max_score += sem['max']
 
         # --- Navigation (12pts) ---
-        nav_tags = soup.find_all('nav')
+        nav_tags = soup.find_all('nav') or soup.find_all(attrs={'role': 'navigation'})
         breadcrumb_html = bool(soup.find(class_=re.compile(r'breadcrumb', re.I)))
         nav_pts = 0; nav_notes = []
         if nav_tags: nav_pts += 7; nav_notes.append(f'{len(nav_tags)} <nav> element(s) ✓')
@@ -2742,19 +2783,22 @@ class CareerSiteGrader:
         head_scripts = head.find_all('script', src=True) if head else []
         blocking_js = [s for s in head_scripts
                        if not s.get('defer') and not s.get('async') and s.get('type') != 'module']
-        nb = len(blocking_js)
+        # Blocking stylesheets in <head> are the #1 paint blocker.
+        head_css = [l for l in (head.find_all('link', rel='stylesheet') if head else [])
+                    if (l.get('media', 'all') or 'all') not in ('print',) and not l.get('disabled')]
+        nb = len(blocking_js) + len(head_css)
         block_max = 10 if self.mode == 'general' else 15
         if nb == 0:
-            pts, note = block_max, 'No render-blocking scripts in <head> ✓'
+            pts, note = block_max, 'No render-blocking scripts/CSS in <head> ✓'
         elif nb <= 2:
-            pts, note = round(block_max * 0.8), f'{nb} render-blocking script(s) in <head> — add defer/async'
+            pts, note = round(block_max * 0.8), f'{nb} render-blocking resource(s) in <head> ({len(blocking_js)} JS, {len(head_css)} CSS)'
         elif nb <= 5:
-            pts, note = round(block_max * 0.45), f'{nb} render-blocking scripts in <head> — defer/async these'
+            pts, note = round(block_max * 0.45), f'{nb} render-blocking resources in <head> ({len(blocking_js)} JS, {len(head_css)} CSS) — defer JS, inline critical CSS'
         else:
-            pts, note = round(block_max * 0.15), f'{nb} render-blocking scripts in <head> — critical'
+            pts, note = round(block_max * 0.15), f'{nb} render-blocking resources in <head> ({len(blocking_js)} JS, {len(head_css)} CSS)'
         checks.append({'name': 'Render-Blocking Scripts', 'weight': block_max, 'score': pts, 'max': block_max,
                         'status': self._pts_status(pts, block_max), 'detail': note,
-                        'value': f'{nb} in <head>'})
+                        'value': f'{len(blocking_js)} JS + {len(head_css)} CSS in <head>'})
         score += pts; max_score += block_max
 
         # --- General mode extras ---
@@ -2770,8 +2814,8 @@ class CareerSiteGrader:
                             'value': alt_svc[:60] if alt_svc else None})
             score += h2_pts; max_score += 10
 
-            # Analytics Detection (10pts)
-            html_lower = self.html.lower()
+            # Analytics Detection (10pts) — incl. GTM/JS-injected tags
+            html_lower = self._combined_html() + ' ' + (self.rendered_html or '').lower()
             analytics = []
             for name, pattern in [
                 ('Google Analytics', r'gtag|google-analytics|googletagmanager|ga\.js|analytics\.js'),
@@ -2944,15 +2988,16 @@ class CareerSiteGrader:
 
             # Analytics (10pts for general conversion)
             analytics_detected = bool(re.search(
-                r'gtag|google-analytics|googletagmanager|plausible|fathom|matomo|hotjar|mixpanel', html_lower))
+                r'gtag|google-analytics|googletagmanager|plausible|fathom|matomo|hotjar|mixpanel',
+                self._combined_html() + ' ' + (self.rendered_html or '').lower()))
             an_pts = 10 if analytics_detected else 0
             an_note = 'Analytics/tracking present ✓' if analytics_detected else 'No analytics — no conversion tracking'
             checks.append({'name': 'Analytics & Tracking', 'weight': 10, 'score': an_pts, 'max': 10,
                             'status': self._pts_status(an_pts, 10), 'detail': an_note})
             score += an_pts; max_score += 10
         else:
-            share_els = soup.find_all(class_=re.compile(r'\bshare\b|social-share', re.I))
-            share_sig = bool(re.search(r'share.*job|refer.*friend|share.*role', html_lower))
+            share_els = self._find_all_pages(class_=re.compile(r'\bshare\b|social-share|addtoany|sharethis', re.I))
+            share_sig = bool(re.search(r'share (this )?(job|role|vacancy)|refer a friend', self._combined_text()))
             share_pts = 15 if (share_els or share_sig) else 0
             share_note = 'Social sharing detected ✓' if (share_els or share_sig) else \
                          'No social sharing — candidates cannot easily refer friends'
