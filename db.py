@@ -85,6 +85,12 @@ def init_db():
                     data_json TEXT,
                     created_at REAL
                 );
+
+                CREATE TABLE IF NOT EXISTS outcomes (
+                    domain TEXT, mode TEXT, metric TEXT,
+                    value REAL, created_at REAL,
+                    PRIMARY KEY (domain, mode, metric)
+                );
                 """
             )
         return True
@@ -319,6 +325,46 @@ def get_authority(domain: str, max_age_days: float = 7) -> Optional[Dict]:
         return json.loads(row['data_json'])
     except Exception:
         return None
+
+
+def save_outcome(domain: str, mode: str, metric: str, value: float) -> bool:
+    """Record a real-world outcome (e.g. GSC clicks, GA4 sessions, applications)
+    for a domain — used to calibrate pillar weights against reality."""
+    if not _ENABLED:
+        return False
+    try:
+        with _LOCK, _connect() as conn:
+            conn.execute(
+                'INSERT INTO outcomes (domain, mode, metric, value, created_at) VALUES (?,?,?,?,?) '
+                'ON CONFLICT(domain, mode, metric) DO UPDATE SET value=excluded.value, created_at=excluded.created_at',
+                (domain, mode, metric, float(value), time.time()))
+        return True
+    except Exception:
+        return False
+
+
+def calibration_rows(mode: str, metric: str) -> List[Dict]:
+    """Latest pillar scores + the outcome value for every domain that has both —
+    the dataset for calibrating weights against real traffic/conversions."""
+    if not _ENABLED:
+        return []
+    try:
+        with _LOCK, _connect() as conn:
+            rows = conn.execute(
+                'SELECT g.pillars_json pj, o.value val FROM grades g '
+                'JOIN outcomes o ON o.domain=g.domain AND o.mode=g.mode '
+                'WHERE g.mode=? AND o.metric=? AND g.id IN '
+                '(SELECT MAX(id) FROM grades WHERE mode=? GROUP BY domain)',
+                (mode, metric, mode)).fetchall()
+        out = []
+        for r in rows:
+            try:
+                out.append({'pillars': json.loads(r['pj']), 'outcome': r['val']})
+            except Exception:
+                continue
+        return out
+    except Exception:
+        return []
 
 
 def stats() -> Dict:

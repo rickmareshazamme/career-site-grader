@@ -103,7 +103,9 @@ class CareerSiteGrader:
             self._psi_task = asyncio.ensure_future(self._fetch_pagespeed())
 
         # Parallel secondary fetches
-        yield {'type': 'status', 'message': 'Checking AI crawler access and robots.txt...', 'progress': 18}
+        crawl_msg = ('Crawling the full site (every sitemap page) for site-wide coverage...'
+                     if self.mode != 'general' else 'Checking AI crawler access and robots.txt...')
+        yield {'type': 'status', 'message': crawl_msg, 'progress': 18}
         secondary_fetches = [self._fetch_robots_txt(), self._check_llms_txt(),
                              self._check_llm_info(), self._fetch_authority()]
         if self.mode == 'general':
@@ -114,10 +116,16 @@ class CareerSiteGrader:
             secondary_fetches.append(self._fetch_recruitment_pages())
         await asyncio.gather(*secondary_fetches)
 
-        # Optional headless render — see what AI crawlers (no JS) cannot.
-        if renderer.enabled():
+        # Optional headless render — see what AI crawlers (no JS) cannot. Fires for
+        # thin pages OR anything that looks like a JS-rendered SPA (empty root /
+        # very low text-to-HTML ratio), not just a hard char threshold.
+        if renderer.enabled() and not self.light:
             static_text_len = len(self.soup.get_text(' ', strip=True)) if self.soup else 0
-            if static_text_len < 2500:  # only bother for thin/JS-heavy pages
+            html_len = max(len(self.html), 1)
+            empty_spa_root = bool(self.soup and self.soup.find(id=re.compile(r'^(root|app|__next)$'))
+                                  and static_text_len < 1500)
+            js_heavy = (static_text_len / html_len) < 0.04
+            if static_text_len < 3500 or empty_spa_root or js_heavy:
                 yield {'type': 'status', 'message': 'Rendering JavaScript to capture client-side content...', 'progress': 22}
                 rendered = await renderer.render_html(self.url)
                 if rendered:
@@ -387,63 +395,189 @@ class CareerSiteGrader:
         except Exception:
             pass
 
+    # Full-crawl ceiling — virtually every recruitment site fits; protects against
+    # pathological 10k+ page sites (those are crawled up to the ceiling + flagged).
+    CRAWL_CEILING = 1500
+    PRIORITY_SOUPS = 25  # full soups kept in memory for the detailed checks
+
+    # The core recruitment-SEO structure: distinct content streams targeting
+    # employers ("[sector] recruitment") AND jobseekers ("[sector] jobs"), each
+    # ideally carrying FAQ, named consultants, JSON-LD schema, and live jobs.
+    SECTOR_RE = re.compile(
+        r'accounting|finance|financial|banking|insurance|technolog|\btech\b|software|digital|'
+        r'\bdata\b|engineer|construction|infrastructure|civil|healthcare|health.?care|medical|'
+        r'nursing|clinical|pharmaceutic|pharma|life.?science|legal|\blaw\b|marketing|creative|'
+        r'design|\bmedia\b|manufactur|industrial|retail|\bfmcg\b|\bsales\b|education|teaching|'
+        r'administrat|executive|logistics|supply.?chain|procurement|warehous|mining|resources|'
+        r'energy|oil.?&.?gas|property|real.?estate|facilities|hospitality|tourism|science|'
+        r'government|public.?sector|agricultur|human.?resources|\bhr\b|\bit\b', re.I)
+    EMPLOYER_RE = re.compile(
+        r'recruit|staffing|recruiting|talent.?solution|workforce.?solution|hir(e|ing)|'
+        r'employer|client|for.?business|find.?(staff|talent|candidates)', re.I)
+    JOBSEEKER_RE = re.compile(
+        r'\bjobs?\b|vacanc|careers?|\broles?\b|positions?|opportunit|find.?(a.?)?job|search.?jobs', re.I)
+
     async def _fetch_recruitment_pages(self):
-        """Fetch dedicated job routes AND key content pages (FAQ / about), plus any
-        FAQ/about/sector pages discovered in the sitemap — so page-level signals
-        (apply flow, FAQ schema, etc.) aren't false-negatived by only scanning the
-        homepage. The grade still reflects a *sample* of pages, surfaced as
-        pages_scanned so the scope is transparent."""
+        """TRUE full-site crawl: fetch EVERY page in the sitemap (up to a ceiling),
+        counting per-page coverage (FAQ/JobPosting/Org/Breadcrumb schema, H1) so the
+        coverage % is genuinely site-wide — not a sample. Full soups are retained
+        only for a handful of priority pages (job/FAQ/about) to feed the detailed
+        signal checks; the rest are parsed, counted, and discarded to bound memory."""
         job_paths = ['/job-results', '/job-detail', '/jobs', '/search-jobs',
                      '/job-search', '/vacancies', '/careers', '/find-a-job']
         content_paths = ['/faq', '/faqs', '/frequently-asked-questions',
                          '/about', '/about-us', '/help']
+        # Per-page coverage counters (the authoritative site-wide numbers).
+        cov = {'pages_checked': 0, 'content_pages': 0, 'job_pages': 0,
+               'faq_pages': 0, 'jobposting_pages': 0, 'organization_pages': 0,
+               'breadcrumb_pages': 0}
+        h1_missing: List[str] = []
+        h1_multi = 0
+        # Recruitment content streams (employer vs jobseeker sector pages) + richness.
+        emp_sectors: set = set()
+        seek_sectors: set = set()
+        streams = {'employer_pages': 0, 'jobseeker_pages': 0,
+                   'sector_pages': 0, 'sector_faq': 0, 'sector_consultants': 0,
+                   'sector_jsonld': 0, 'sector_jobs': 0,
+                   'examples_employer': [], 'examples_jobseeker': []}
+
+        def _classify_stream(url, title, h1txt, types, soup):
+            hay = f'{url} {title} {h1txt}'.lower()
+            if not self.SECTOR_RE.search(hay):
+                return
+            sector_m = self.SECTOR_RE.search(hay)
+            sector = sector_m.group(0) if sector_m else ''
+            is_emp = bool(self.EMPLOYER_RE.search(hay))
+            is_seek = bool(self.JOBSEEKER_RE.search(hay))
+            if not (is_emp or is_seek):
+                return
+            streams['sector_pages'] += 1
+            # richness signals on the sector page
+            if (types & {'FAQPage', 'QAPage'}) or soup.find(class_=re.compile(r'faq|accordion', re.I)):
+                streams['sector_faq'] += 1
+            if 'Person' in types or re.search(r'consultant|our.?team|meet.?the.?team|recruiter|specialist',
+                                              soup.get_text(' ')[:6000], re.I):
+                streams['sector_consultants'] += 1
+            if types:
+                streams['sector_jsonld'] += 1
+            if 'JobPosting' in types or soup.find('a', href=re.compile(r'job|apply', re.I)):
+                streams['sector_jobs'] += 1
+            if is_emp:
+                streams['employer_pages'] += 1
+                emp_sectors.add(sector)
+                if len(streams['examples_employer']) < 4:
+                    streams['examples_employer'].append(self._short_path(url))
+            if is_seek:
+                streams['jobseeker_pages'] += 1
+                seek_sectors.add(sector)
+                if len(streams['examples_jobseeker']) < 4:
+                    streams['examples_jobseeker'].append(self._short_path(url))
+
+        # Count the homepage itself first.
+        if self.soup is not None:
+            cov['pages_checked'] += 1
+            t0 = set(self._soup_schema_types(self.soup))
+            if not self.JOB_PAGE_URL.search(self.url) and 'JobPosting' not in t0:
+                cov['content_pages'] += 1
+            else:
+                cov['job_pages'] += 1
+            if t0 & {'FAQPage', 'QAPage'}: cov['faq_pages'] += 1
+            if 'JobPosting' in t0: cov['jobposting_pages'] += 1
+            if t0 & {'Organization', 'Corporation', 'EmploymentAgency', 'StaffingAgency',
+                     'RecruitmentAgency', 'LocalBusiness'}: cov['organization_pages'] += 1
+            if 'BreadcrumbList' in t0: cov['breadcrumb_pages'] += 1
+            nh = len(self.soup.find_all('h1'))
+            if nh == 0: h1_missing.append('/')
+            elif nh > 1: h1_multi += 1
+
         try:
             ssl_ctx = ssl.create_default_context()
             ssl_ctx.check_hostname = False
             ssl_ctx.verify_mode = ssl.CERT_NONE
-            connector = aiohttp.TCPConnector(ssl=ssl_ctx, limit=12)
-            timeout = aiohttp.ClientTimeout(total=15, sock_read=8)
+            connector = aiohttp.TCPConnector(ssl=ssl_ctx, limit=40)
+            timeout = aiohttp.ClientTimeout(total=12, sock_read=8)
+            sem = asyncio.Semaphore(40)
 
             async with aiohttp.ClientSession(connector=connector, timeout=timeout) as sess:
-                async def fetch_one(path, is_job):
-                    url = path if path.startswith('http') else urljoin(self.base_url, path)
-                    if path in self.extra_html:
-                        return
-                    try:
-                        async with sess.get(url, headers=self.HEADERS, allow_redirects=True) as resp:
-                            if resp.status == 200:
+                async def crawl_one(target, is_job, keep_soup):
+                    url = target if target.startswith('http') else urljoin(self.base_url, target)
+                    async with sem:
+                        try:
+                            async with sess.get(url, headers=self.HEADERS, allow_redirects=True) as resp:
+                                if resp.status != 200:
+                                    return
                                 html = await resp.text(encoding='utf-8', errors='replace')
-                                if len(html) > 500:
-                                    page_soup = BeautifulSoup(html, 'html.parser')
-                                    fp = self._fingerprint(page_soup)
-                                    # Skip soft-404s / duplicate homepage shells.
-                                    if fp == self._home_fp or fp in self._seen_fps:
-                                        return
-                                    self._seen_fps.add(fp)
-                                    self.extra_html[path] = html
-                                    self.extra_soups[path] = page_soup
-                                    if is_job:
-                                        self.job_routes_found.append(path)
-                                    self.pages_scanned.append(path)
-                    except Exception:
-                        pass
+                        except Exception:
+                            return
+                    if len(html) < 500:
+                        return
+                    soup = BeautifulSoup(html, 'html.parser')
+                    fp = self._fingerprint(soup)
+                    if fp == self._home_fp or fp in self._seen_fps:
+                        return  # soft-404 / duplicate shell
+                    self._seen_fps.add(fp)
+                    # --- per-page coverage counting (every page) ---
+                    t = set(self._soup_schema_types(soup))
+                    is_job_page = ('JobPosting' in t) or bool(self.JOB_PAGE_URL.search(url))
+                    cov['pages_checked'] += 1
+                    if is_job_page:
+                        cov['job_pages'] += 1
+                    else:
+                        cov['content_pages'] += 1
+                    if t & {'FAQPage', 'QAPage'}: cov['faq_pages'] += 1
+                    if 'JobPosting' in t: cov['jobposting_pages'] += 1
+                    if t & {'Organization', 'Corporation', 'EmploymentAgency', 'StaffingAgency',
+                            'RecruitmentAgency', 'LocalBusiness'}: cov['organization_pages'] += 1
+                    if 'BreadcrumbList' in t: cov['breadcrumb_pages'] += 1
+                    h1_tags = soup.find_all('h1')
+                    nh = len(h1_tags)
+                    if nh == 0:
+                        if len(h1_missing) < 50:
+                            h1_missing.append(self._short_path(url))
+                    elif nh > 1:
+                        nonlocal_inc()
+                    # --- recruitment content-stream classification ---
+                    title_t = soup.find('title')
+                    _classify_stream(url, title_t.get_text() if title_t else '',
+                                     ' '.join(h.get_text(' ') for h in h1_tags), t, soup)
+                    # --- retain full soup only for priority pages ---
+                    if keep_soup and len(self.extra_soups) < self.PRIORITY_SOUPS:
+                        self.extra_html[url] = html
+                        self.extra_soups[url] = soup
+                        if is_job:
+                            self.job_routes_found.append(url)
+                        self.pages_scanned.append(self._short_path(url))
 
-                # Full sitemap → total page count + a coverage sample.
+                def nonlocal_inc():
+                    nonlocal h1_multi
+                    h1_multi += 1
+
                 sitemap_urls = await self._sitemap_urls(sess)
                 self.total_pages = len(sitemap_urls)
-                # Prioritise content-rich pages (FAQ/about/sector/service/job), then fill.
-                pat = re.compile(r'faq|frequently.asked|about|service|sector|specialis|industr|job|career', re.I)
-                priority = [u for u in sitemap_urls if pat.search(u)]
-                rest = [u for u in sitemap_urls if u not in priority]
-                COVERAGE_CAP = 40  # max pages fetched per grade
-                sample = (priority + rest)[:COVERAGE_CAP]
+                pri_re = re.compile(r'faq|frequently.asked|about|service|sector|specialis|industr', re.I)
+                # Priority pages keep soups; everything else is counted-and-discarded.
+                priority_urls = ([(p, True) for p in job_paths]
+                                 + [(p, False) for p in content_paths]
+                                 + [(u, False) for u in sitemap_urls if pri_re.search(u)][:20])
+                pri_set = {u for u, _ in priority_urls}
+                ceiling = 25 if self.light else self.CRAWL_CEILING
+                rest_urls = [u for u in sitemap_urls if u not in pri_set][:ceiling]
 
-                tasks = ([fetch_one(p, True) for p in job_paths]
-                         + [fetch_one(p, False) for p in content_paths]
-                         + [fetch_one(u, False) for u in sample])
+                tasks = ([crawl_one(u, j, True) for u, j in priority_urls]
+                         + [crawl_one(u, False, False) for u in rest_urls])
                 await asyncio.gather(*tasks)
         except Exception:
             pass
+
+        cov['total_pages'] = self.total_pages or cov['pages_checked']
+        cov['h1_missing'] = h1_missing
+        cov['h1_multi'] = h1_multi
+        cov['crawl_capped'] = self.total_pages > self.CRAWL_CEILING
+        streams['sectors_employer'] = sorted(emp_sectors)
+        streams['sectors_jobseeker'] = sorted(seek_sectors)
+        streams['sectors_both'] = sorted(emp_sectors & seek_sectors)
+        cov['streams'] = streams
+        self.coverage = cov
 
     async def _sitemap_urls(self, sess) -> List[str]:
         """Return every page URL from the sitemap (following a sitemap index).
@@ -547,6 +681,7 @@ class CareerSiteGrader:
                 'tbt_ms': audit_num('total-blocking-time'),
                 'fcp_ms': audit_num('first-contentful-paint'),
                 'si_ms': audit_num('speed-index'),
+                'ttfb_ms': audit_num('server-response-time'),
             },
             'field': {
                 'lcp': field('LARGEST_CONTENTFUL_PAINT_MS'),
@@ -961,18 +1096,23 @@ class CareerSiteGrader:
         h1_tags = soup.find_all('h1')
         h1_count = len(h1_tags)
         h1_text = h1_tags[0].get_text().strip() if h1_tags else ''
-        # H1 coverage across ALL scanned pages — report the facts and LIST the
-        # pages actually missing one. (Multiple H1s are valid in HTML5/Google, so
-        # they're not penalised; only a missing H1 is a real problem.)
-        pages = self._coverage_pages()
-        no_h1, multi_h1 = [], []
-        for label, s in pages:
-            n = len(s.find_all('h1'))
-            if n == 0:
-                no_h1.append(self._short_path(label))
-            elif n > 1:
-                multi_h1.append(self._short_path(label))
-        total = len(pages) or 1
+        # H1 coverage across ALL crawled pages (full-site) — report the facts and
+        # LIST the pages missing one. Multiple H1s are valid in HTML5/Google.
+        cov = self._get_coverage()
+        if 'h1_missing' in cov:                 # full-crawl data (recruitment/career)
+            no_h1 = cov['h1_missing']
+            multi_h1 = [None] * cov.get('h1_multi', 0)
+            total = cov['pages_checked'] or 1
+        else:                                   # general mode: pages we have soups for
+            pages = self._coverage_pages()
+            no_h1, multi_h1 = [], []
+            for label, s in pages:
+                n = len(s.find_all('h1'))
+                if n == 0:
+                    no_h1.append(self._short_path(label))
+                elif n > 1:
+                    multi_h1.append(self._short_path(label))
+            total = len(pages) or 1
         with_h1 = total - len(no_h1)
         pts = round(10 * with_h1 / total)
         h1_notes = [f'H1 present on {with_h1} of {total} pages scanned']
@@ -1146,7 +1286,12 @@ class CareerSiteGrader:
             score += v_pts; max_score += v_max
 
         # --- Mode-specific extras ---
-        if self.mode == 'recruitment':
+        if self.mode in ('recruitment', 'career_site'):
+            # THE core recruitment-SEO structure (employer + jobseeker streams).
+            streams_check = self._recruitment_streams_check()
+            checks.append(streams_check)
+            score += streams_check['score']; max_score += streams_check['max']
+            # Keep the legacy sector-page link check too (lighter signal).
             sector_check = self._check_sector_pages(soup)
             checks.append(sector_check)
             score += sector_check['score']; max_score += sector_check['max']
@@ -1172,6 +1317,55 @@ class CareerSiteGrader:
             'checks': checks,
             'summary': self._seo_summary(pct, has_any_schema, has_job_schema),
         }
+
+    def _recruitment_streams_check(self) -> Dict:
+        """THE core recruitment-SEO structure: distinct content streams for
+        EMPLOYERS ("[sector] recruitment") and JOBSEEKERS ("[sector] jobs"),
+        each carrying FAQ, named consultants, JSON-LD schema, and live jobs."""
+        st = self._get_coverage().get('streams', {})
+        mx = 20
+        emp = st.get('employer_pages', 0)
+        seek = st.get('jobseeker_pages', 0)
+        both = len(st.get('sectors_both', []))
+        sec_total = st.get('sector_pages', 0)
+        pts = 0; notes = []
+
+        # 1. Two distinct audience streams (10 pts) — the headline factor.
+        if emp and seek:
+            pts += 10
+            notes.append(f'Both streams ✓ — {emp} employer ("[sector] recruitment") + '
+                         f'{seek} jobseeker ("[sector] jobs") pages')
+        elif emp or seek:
+            pts += 4
+            have, missing = (('employer', 'jobseeker "[sector] jobs"') if emp
+                             else ('jobseeker', 'employer "[sector] recruitment"'))
+            notes.append(f'Only the {have} stream found — add the {missing} stream')
+        else:
+            notes.append('No sector content streams — build "[sector] recruitment" (for employers) '
+                         'AND "[sector] jobs" (for jobseekers)')
+
+        # 2. Sector breadth covered in BOTH streams (4 pts).
+        if both >= 5:
+            pts += 4; notes.append(f'{both} sectors covered in both streams ✓')
+        elif both >= 1:
+            pts += 2; notes.append(f'{both} sector(s) in both streams — expand to more sectors')
+
+        # 3. Richness: do the sector pages carry FAQ / consultants / JSON-LD / jobs (6 pts)?
+        if sec_total:
+            checks = [('sector_faq', 'FAQ'), ('sector_consultants', 'consultants'),
+                      ('sector_jsonld', 'JSON-LD'), ('sector_jobs', 'live jobs')]
+            present = [label for key, label in checks if st.get(key, 0) / sec_total >= 0.5]
+            missing = [label for key, label in checks if st.get(key, 0) / sec_total < 0.5]
+            pts += round(6 * len(present) / 4)
+            if present:
+                notes.append('sector pages carry: ' + ', '.join(present) + ' ✓')
+            if missing:
+                notes.append('sector pages missing: ' + ', '.join(missing))
+        pts = min(pts, mx)
+        examples = (st.get('examples_employer', []) + st.get('examples_jobseeker', []))[:4]
+        return {'name': 'Recruitment Content Streams', 'weight': mx, 'score': pts, 'max': mx,
+                'status': self._pts_status(pts, mx), 'detail': ' | '.join(notes),
+                'value': ', '.join(examples) if examples else None}
 
     def _check_sector_pages(self, soup: BeautifulSoup) -> Dict:
         """
@@ -1980,18 +2174,27 @@ class CareerSiteGrader:
                 'status': self._pts_status(pts, mx), 'detail': ' | '.join(notes)}
 
     def _ttfb_check(self, mx: int, name: str = 'Server Response (TTFB)') -> Dict:
-        """Response time of a single cold server-side fetch (includes our network
-        latency to the origin) — graded on web.dev TTFB bands, not asserting a
-        server fault. CrUX field TTFB, when available, is the authoritative source."""
-        rt = self.response_time
-        if rt < 0.8:
-            pts, note = mx, f'Fast first byte: {rt:.2f}s'
-        elif rt < 1.8:
-            pts, note = round(mx * 0.75), f'Reasonable first byte: {rt:.2f}s (single cold fetch incl. network)'
-        elif rt < 3.0:
-            pts, note = round(mx * 0.45), f'Slow first byte: {rt:.2f}s — check caching/CDN (or cold start)'
+        """TTFB graded on web.dev bands. Prefers Google Lighthouse's measured
+        server-response-time (region-independent) when PageSpeed has run; otherwise
+        falls back to our single cold fetch (which includes the runner's network
+        latency, so it's framed honestly rather than asserting a server fault)."""
+        lab_ttfb = None
+        if self.pagespeed:
+            lab_ttfb = (self.pagespeed.get('lab') or {}).get('ttfb_ms')
+        if lab_ttfb is not None:
+            rt = lab_ttfb / 1000.0
+            src = 'Google-measured (Lighthouse)'
         else:
-            pts, note = round(mx * 0.2), f'Very slow first byte: {rt:.2f}s — investigate caching/CDN/host'
+            rt = self.response_time
+            src = 'single cold fetch incl. network'
+        if rt < 0.8:
+            pts, note = mx, f'Fast first byte: {rt:.2f}s — {src}'
+        elif rt < 1.8:
+            pts, note = round(mx * 0.75), f'Reasonable first byte: {rt:.2f}s — {src}'
+        elif rt < 3.0:
+            pts, note = round(mx * 0.45), f'Slow first byte: {rt:.2f}s — check caching/CDN ({src})'
+        else:
+            pts, note = round(mx * 0.2), f'Very slow first byte: {rt:.2f}s — investigate caching/CDN/host ({src})'
         return {'name': name, 'weight': mx, 'score': pts, 'max': mx,
                 'status': self._pts_status(pts, mx), 'detail': note, 'value': f'{rt:.2f}s'}
 
@@ -3070,6 +3273,7 @@ class CareerSiteGrader:
         'Canonical URL': 'A <link rel="canonical"> tells Google which URL is the master version, preventing duplicate-content dilution from tracking params or www/non-www variants. Add a self-referencing canonical to every page.',
         'Indexability': 'Controls whether Google is allowed to list the page. A "noindex" robots meta tag hides the page from search entirely — only use it on thank-you/admin pages. Make sure your money pages do NOT carry noindex.',
         'Heading Hierarchy': 'H2/H3 subheadings break content into scannable, topic-labelled sections that both readers and AI engines parse. Add 4+ descriptive H2s (and H3s beneath them) instead of a wall of text.',
+        'Recruitment Content Streams': 'The #1 recruitment-SEO structure: build TWO distinct content streams — one for EMPLOYERS ("[sector] recruitment", e.g. "IT Recruitment Agency") and one for JOBSEEKERS ("[sector] jobs", e.g. "IT Jobs") — for every sector you serve. Each sector page should carry an FAQ, named consultants/specialists, JSON-LD schema, and live job listings. This captures both sides of the high-intent search market.',
         'Industry & Sector Pages': 'Dedicated pages like "Accounting Jobs" or "IT Recruitment" capture high-intent searches and are 60-80% of recruiter organic traffic. Build one SEO page per sector you recruit in, each with its own title, copy and a live job feed. Shazamme can auto-generate these.',
         'Sitemap.xml': 'An XML list of all your URLs that search engines use to discover pages. Generate /sitemap.xml automatically and submit it in Google Search Console so new jobs and pages get crawled fast.',
         'AI Crawler Access': 'AI engines (ChatGPT, Perplexity, Gemini, Claude) can only cite you if their crawlers are allowed in robots.txt. Make sure GPTBot, OAI-SearchBot, ClaudeBot, Google-Extended, PerplexityBot and others are not Disallowed. Add a Sitemap: line to robots.txt too.',
@@ -3155,6 +3359,7 @@ class CareerSiteGrader:
         'Indexability': [('Google: robots meta tag', 'https://developers.google.com/search/docs/crawling-indexing/robots-meta-tag')],
         'Heading Hierarchy': [('WebAIM: headings', 'https://webaim.org/techniques/semanticstructure/')],
         'Heading Structure': [('WebAIM: headings', 'https://webaim.org/techniques/semanticstructure/')],
+        'Recruitment Content Streams': [('Example: jobseeker stream', 'https://www.hays.co.uk/it-jobs'), ('Example: employer stream', 'https://www.hays.co.uk/recruitment/it')],
         'Industry & Sector Pages': [('Example: sector landing pages', 'https://www.hays.co.uk/recruitment')],
         'Sitemap.xml': [('Spec: sitemaps.org', 'https://www.sitemaps.org/protocol.html')],
         'AI Crawler Access': [
@@ -3285,6 +3490,7 @@ class CareerSiteGrader:
             'DE&I Commitment': 'Growing factor in employer selection — affects talent pipeline diversity',
             'Content Depth': 'Thin pages rank poorly and give AI engines nothing to work with',
             'Entity & Authority': 'sameAs/Wikidata/LinkedIn links + NAP let AI engines reliably identify and cite your brand in the Knowledge Graph',
+            'Recruitment Content Streams': 'Distinct employer + jobseeker sector pages (with FAQ, consultants, schema, jobs) are THE highest-traffic recruitment-SEO asset — they own both sides of the high-intent market',
             'Industry & Sector Pages': 'Pages like "accounting jobs" and "IT recruitment" capture high-intent keyword searches — typically 60-80% of recruiter organic traffic',
             'Indexability': 'If noindex is set, your page will not appear in any search results',
             'Canonical URL': 'Prevents duplicate content from splitting your ranking signals',

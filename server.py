@@ -495,6 +495,72 @@ def cron_seed():
     return jsonify({'started': True, 'sites': len(SEED_SITES), 'mode': mode})
 
 
+@app.route('/api/outcome', methods=['POST'])
+def api_outcome():
+    """Ingest a real-world outcome for a domain (token-protected) so pillar weights
+    can be calibrated against reality. Body: {domain, mode, metric, value}."""
+    token = (request.args.get('token') or '').strip()
+    expected = _admin_token()
+    if not expected or not secrets.compare_digest(token, expected):
+        return jsonify({'error': 'unauthorized'}), 401
+    d = request.get_json(silent=True) or {}
+    domain = (d.get('domain') or '').strip().lower().lstrip('www.')
+    mode = (d.get('mode') or 'recruitment').strip()
+    metric = (d.get('metric') or 'gsc_clicks').strip()
+    try:
+        value = float(d.get('value'))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'value must be numeric'}), 400
+    if not domain or mode not in VALID_MODES:
+        return jsonify({'error': 'domain + valid mode required'}), 400
+    ok = db.save_outcome(domain, mode, metric, value)
+    return jsonify({'ok': ok})
+
+
+@app.route('/cron/calibrate')
+def cron_calibrate():
+    """Suggest pillar weights by correlating each pillar's score with a real
+    outcome metric across domains that have both. Surfaces recommendations — does
+    NOT auto-apply. Token-protected."""
+    token = (request.args.get('token') or '').strip()
+    expected = os.environ.get('CRON_TOKEN', '') or _admin_token()
+    if not expected or not secrets.compare_digest(token, expected):
+        return jsonify({'error': 'unauthorized'}), 401
+    mode = (request.args.get('mode') or 'recruitment').strip()
+    metric = (request.args.get('metric') or 'gsc_clicks').strip()
+    rows = db.calibration_rows(mode, metric)
+    n = len(rows)
+    if n < 12:
+        return jsonify({'mode': mode, 'metric': metric, 'samples': n,
+                        'ready': False,
+                        'note': f'Need >=12 domains with both a grade and a "{metric}" outcome; have {n}. '
+                                'POST outcomes to /api/outcome (e.g. from GSC/GA4) to enable calibration.'})
+
+    # Pearson correlation of each pillar score vs the outcome.
+    pillars = sorted({k for r in rows for k in r['pillars'].keys()})
+    outcomes = [r['outcome'] for r in rows]
+
+    def pearson(xs, ys):
+        m = len(xs)
+        mx = sum(xs) / m; my = sum(ys) / m
+        num = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+        dx = (sum((x - mx) ** 2 for x in xs)) ** 0.5
+        dy = (sum((y - my) ** 2 for y in ys)) ** 0.5
+        return (num / (dx * dy)) if dx and dy else 0.0
+
+    corr = {}
+    for p in pillars:
+        xs = [r['pillars'].get(p, 0) for r in rows]
+        corr[p] = round(pearson(xs, outcomes), 3)
+    # Suggested weights = positive correlations, normalised to sum 1.
+    pos = {p: max(c, 0) for p, c in corr.items()}
+    tot = sum(pos.values()) or 1
+    suggested = {p: round(v / tot, 3) for p, v in pos.items()}
+    return jsonify({'mode': mode, 'metric': metric, 'samples': n, 'ready': True,
+                    'correlations': corr, 'suggested_weights': suggested,
+                    'note': 'Correlation of each pillar score with the outcome. Review before applying.'})
+
+
 @app.route('/stats')
 def stats():
     return jsonify(db.stats())
