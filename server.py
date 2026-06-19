@@ -424,21 +424,11 @@ SEED_SITES = [
 ]
 
 
-@app.route('/cron/seed')
-def cron_seed():
-    """Populate the benchmark dataset by light-grading a curated list so
-    percentile benchmarking becomes meaningful. Protect with ?token=CRON_TOKEN."""
-    token = (request.args.get('token') or '').strip()
-    expected = os.environ.get('CRON_TOKEN', '')
-    if not expected or token != expected:
-        return jsonify({'error': 'unauthorized'}), 401
-    mode = (request.args.get('mode') or 'recruitment').strip()
-
+def _seed_bg(mode):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
     async def seed():
-        done = []
         for site in SEED_SITES:
             try:
                 g = CareerSiteGrader(site, mode=mode, light=True)
@@ -450,16 +440,26 @@ def cron_seed():
                     db.save_grade(final.get('url', site), final.get('domain', ''), mode,
                                   final.get('overall_score', 0), final.get('grade', ''),
                                   _pillar_scores(final))
-                    done.append({'site': site, 'overall': final.get('overall_score')})
-            except Exception as e:
-                done.append({'site': site, 'error': str(e)[:60]})
-        return done
-
+            except Exception:
+                pass
     try:
-        results = loop.run_until_complete(seed())
+        loop.run_until_complete(seed())
     finally:
         loop.close()
-    return jsonify({'seeded': len([r for r in results if 'overall' in r]), 'results': results})
+
+
+@app.route('/cron/seed')
+def cron_seed():
+    """Populate the benchmark dataset by light-grading a curated list so
+    percentile benchmarking becomes meaningful. Runs in the background (25 sites
+    take several minutes). Protect with ?token=CRON_TOKEN."""
+    token = (request.args.get('token') or '').strip()
+    expected = os.environ.get('CRON_TOKEN', '')
+    if not expected or token != expected:
+        return jsonify({'error': 'unauthorized'}), 401
+    mode = (request.args.get('mode') or 'recruitment').strip()
+    threading.Thread(target=_seed_bg, args=(mode,), daemon=True).start()
+    return jsonify({'started': True, 'sites': len(SEED_SITES), 'mode': mode})
 
 
 @app.route('/stats')
