@@ -558,6 +558,8 @@ body {
   border: 1px solid var(--border); color: var(--text1); font-size: 13px;
 }
 #competitor-input::placeholder { color: var(--text3); }
+.fresh-toggle { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 12px; color: var(--text3); cursor: pointer; user-select: none; }
+.fresh-toggle input { cursor: pointer; }
 
 /* Executive summary */
 .exec-summary { margin-bottom: 8px; }
@@ -961,6 +963,9 @@ hr.section-divider {
         aria-label="Competitor URLs"
       >
     </div>
+    <label class="fresh-toggle" id="fresh-toggle" title="Admin: ignore cached authority & Core Web Vitals and re-measure">
+      <input type="checkbox" id="fresh-check"> Force fresh (bypass cache)
+    </label>
     <p class="example-links" id="example-links">Select a mode above to get started</p>
   </form>
 
@@ -1281,6 +1286,17 @@ function startGrading(e) {
   const compRaw = ($('competitor-input') ? $('competitor-input').value.trim() : '');
   let gradeUrl = '/grade?url=' + encodeURIComponent(url) + '&mode=' + selectedMode;
   if (compRaw) gradeUrl += '&competitors=' + encodeURIComponent(compRaw);
+
+  // Admin "Force fresh" — remembers the admin token in this browser
+  const freshCheck = $('fresh-check');
+  if (freshCheck && freshCheck.checked) {
+    let tok = localStorage.getItem('grader_admin_token') || '';
+    if (!tok) {
+      tok = (prompt('Admin token (stored in this browser only):') || '').trim();
+      if (tok) localStorage.setItem('grader_admin_token', tok);
+    }
+    if (tok) gradeUrl += '&fresh=1&token=' + encodeURIComponent(tok);
+  }
   const evtSource = new EventSource(gradeUrl);
 
   const checkHistory = [];
