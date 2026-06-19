@@ -442,13 +442,34 @@ class CareerSiteGrader:
                    'examples_employer': [], 'examples_jobseeker': []}
 
         def _classify_stream(url, title, h1txt, types, soup):
-            hay = f'{url} {title} {h1txt}'.lower()
-            if not self.SECTOR_RE.search(hay):
+            path = urlparse(url).path.lower()
+            # Exclude blog/news/insight/article pages — not stream LANDING pages.
+            if re.search(r'insight|/blog|/news|/article|/guide|/resource|case.?stud|/press|'
+                         r'/event|/stor(y|ies)|/advice|/tips|/faq', path):
                 return
+            # Exclude individual job postings (JobPosting schema or numeric-id slug) —
+            # we count sector LANDING pages, not single job ads.
+            if 'JobPosting' in types or re.search(r'-\d{4,}/?$', path):
+                return
+            label = f'{title} {h1txt}'.lower()
+            hay = f'{path} {label}'
             sector_m = self.SECTOR_RE.search(hay)
-            sector = sector_m.group(0) if sector_m else ''
-            is_emp = bool(self.EMPLOYER_RE.search(hay))
-            is_seek = bool(self.JOBSEEKER_RE.search(hay))
+            if not sector_m:
+                return
+            sector = sector_m.group(0)
+            # PATH-aware stream disambiguation first (most reliable), then keywords.
+            seek_path = bool(re.search(r'/(jobs?|vacanc\w*|careers?|roles?|positions?)(/|$)', path))
+            emp_path = bool(re.search(r'/(industr\w*|sectors?|recruit\w*|staffing|employers?|clients?|'
+                                      r'business|hiring|services?|solutions?)(/|-|$)', path))
+            is_seek = seek_path or (not emp_path and bool(self.JOBSEEKER_RE.search(label)))
+            is_emp = emp_path or (not seek_path and bool(self.EMPLOYER_RE.search(label)))
+            # If both path signals fire (e.g. /industries/legal-jobs/), the section
+            # path wins: /industries|/recruitment = employer; /jobs/ = jobseeker.
+            if seek_path and emp_path:
+                if re.search(r'/(jobs?|vacanc\w*|careers?)(/|$)', path):
+                    is_emp = False
+                else:
+                    is_seek = False
             if not (is_emp or is_seek):
                 return
             streams['sector_pages'] += 1
