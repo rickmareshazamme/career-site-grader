@@ -52,6 +52,7 @@ class CareerSiteGrader:
         self.has_llms_txt = False
         self.llm_info_url: Optional[str] = None   # path that returned 200 for llm-info
         self.has_sitemap = False
+        self.sitemap_is_index = False
         self.sitemap_url: Optional[str] = None
         self.errors: List[str] = []
         # Multi-page evidence (recruitment/career modes fetch /job-results, /job-detail, ...)
@@ -659,6 +660,10 @@ class CareerSiteGrader:
                 except Exception:
                     continue
                 locs = re.findall(r'<loc>\s*([^<\s]+)\s*</loc>', body)
+                if locs:
+                    self.has_sitemap = True
+                    self.sitemap_url = urljoin(self.base_url, sm)
+                    self.sitemap_is_index = '<sitemapindex' in body.lower()
                 if '<sitemapindex' in body.lower():
                     child_sitemaps = locs[:25]  # bound the number of child sitemaps
                     for child in child_sitemaps:
@@ -1359,15 +1364,110 @@ class CareerSiteGrader:
             checks.append(sector_check)
             score += sector_check['score']; max_score += sector_check['max']
 
-        elif self.mode == 'general':
-            # Sitemap check (10pts)
-            if self.has_sitemap:
-                pts, note = 10, 'sitemap.xml found ✓'
+        # --- XML Sitemap (ALL modes) ---
+        sm_max = 10
+        robots_l = (self.robots_txt or '').lower()
+        sm_in_robots = 'sitemap:' in robots_l
+        sm_present = self.has_sitemap or self.total_pages > 0 or sm_in_robots
+        sm_pts = 0; sm_notes = []
+        if sm_present:
+            sm_pts += 7
+            kind = 'sitemap index' if self.sitemap_is_index else 'sitemap.xml'
+            cnt = self.total_pages or 0
+            sm_notes.append(f'{kind} found ✓' + (f' ({cnt} URLs)' if cnt else ''))
+            if sm_in_robots:
+                sm_pts += 3; sm_notes.append('referenced in robots.txt ✓')
             else:
-                pts, note = 0, 'No sitemap.xml — search engines rely on this for discovery'
-            checks.append({'name': 'Sitemap.xml', 'weight': 10, 'score': pts, 'max': 10,
-                            'status': self._pts_status(pts, 10), 'detail': note})
-            score += pts; max_score += 10
+                sm_notes.append('add a "Sitemap:" line to robots.txt so crawlers discover it faster')
+        else:
+            sm_notes.append('No XML sitemap found — search engines rely on it for discovery; '
+                            'generate /sitemap.xml and reference it in robots.txt')
+        checks.append({'name': 'XML Sitemap', 'weight': sm_max, 'score': sm_pts, 'max': sm_max,
+                        'status': self._pts_status(sm_pts, sm_max), 'detail': ' | '.join(sm_notes)})
+        score += sm_pts; max_score += sm_max
+
+        # --- robots.txt health (general-SEO crawl access, distinct from AI-crawler tiers) ---
+        rb_max = 10
+        rb_pts = rb_max; rb_notes = []
+        if not self.robots_txt:
+            rb_notes.append('No robots.txt — all crawlers allowed (fine); add one with a Sitemap: directive')
+        else:
+            rb_notes.append('robots.txt found ✓')
+            blocked = self._parse_robots_blocks(self.robots_txt)
+            star_blocked = blocked.get('*', False)
+            google_blocked = blocked.get('googlebot', False) or star_blocked
+            # Only flag a block on the jobs/careers SECTION ROOT (Disallow: /jobs,
+            # /jobs/, /jobs/*, /careers) — NOT functional sub-paths like /job-apply/,
+            # /job_alert, /jobs/saved which are correct to keep out of the index.
+            job_block = bool(re.search(
+                r'(?im)^\s*disallow:\s*/(jobs?|careers?|vacanc\w*)\s*(/\s*)?\*?\s*$', self.robots_txt))
+            if star_blocked or blocked.get('googlebot', False):
+                rb_pts = 0
+                who = 'Googlebot' if blocked.get('googlebot', False) and not star_blocked else 'all crawlers'
+                rb_notes.append(f'CRITICAL: robots.txt blocks the entire site (Disallow: /) for {who} '
+                                '— you are invisible to search')
+            elif job_block:
+                rb_pts = 4
+                rb_notes.append('WARNING: a Disallow rule blocks your jobs/careers path — '
+                                'kills Google Jobs eligibility & job indexing')
+            else:
+                rb_notes.append('no blanket block on the homepage or jobs paths ✓')
+        checks.append({'name': 'robots.txt Health', 'weight': rb_max, 'score': rb_pts, 'max': rb_max,
+                        'status': self._pts_status(rb_pts, rb_max), 'detail': ' | '.join(rb_notes)})
+        score += rb_pts; max_score += rb_max
+
+        # --- Google location schema (LocalBusiness / PostalAddress / geo) ---
+        def _types_of(n):
+            t = n.get('@type', '')
+            return {t} if isinstance(t, str) else set(map(str, t or []))
+        LOC_TYPES = {'LocalBusiness', 'Organization', 'Corporation', 'EmploymentAgency',
+                     'StaffingAgency', 'RecruitmentAgency', 'ProfessionalService'}
+        LOCAL_STRONG = {'LocalBusiness', 'EmploymentAgency', 'StaffingAgency',
+                        'RecruitmentAgency', 'ProfessionalService'}
+        org_local = [n for n in self._get_schema_objects() if _types_of(n) & LOC_TYPES]
+        has_local = any(_types_of(n) & LOCAL_STRONG for n in org_local)
+        addr_objs = []
+        for n in org_local:
+            a = n.get('address')
+            for ax in (a if isinstance(a, list) else [a]):
+                if isinstance(ax, dict):
+                    addr_objs.append(ax)
+        ADDR_FIELDS = ('streetAddress', 'addressLocality', 'postalCode', 'addressRegion', 'addressCountry')
+        best_addr = max((sum(1 for f in ADDR_FIELDS if ax.get(f)) for ax in addr_objs), default=0)
+        has_geo = any(isinstance(n.get('geo'), dict) and n['geo'].get('latitude') and n['geo'].get('longitude')
+                      for n in org_local) or \
+                  any(isinstance(ax.get('geo'), dict) and ax['geo'].get('latitude') for ax in addr_objs)
+        area_served = any(n.get('areaServed') for n in org_local)
+        n_locations = max(len(addr_objs), sum(1 for n in org_local if 'LocalBusiness' in _types_of(n)))
+
+        loc_max = 12 if self.mode in ('recruitment', 'career_site') else 8
+        loc_pts = 0; loc_notes = []
+        if has_local:
+            loc_pts += 3; loc_notes.append('LocalBusiness/agency schema ✓')
+        elif org_local:
+            loc_pts += 1; loc_notes.append('Organization present — upgrade to LocalBusiness for Google local pack')
+        else:
+            loc_notes.append('No LocalBusiness/Organization schema — invisible to Google local pack & Maps')
+        if best_addr >= 4:
+            loc_pts += 3; loc_notes.append(f'PostalAddress complete ({best_addr}/5 fields) ✓')
+        elif best_addr >= 1:
+            loc_pts += 1; loc_notes.append(f'PostalAddress partial ({best_addr}/5) — add street/city/postcode/region/country')
+        else:
+            loc_notes.append('No structured PostalAddress — add street/city/postcode to your schema')
+        if has_geo:
+            loc_pts += 3; loc_notes.append('geo coordinates ✓')
+        else:
+            loc_notes.append('No geo lat/lng — add for map pins & "[service] near me" searches')
+        if n_locations >= 2:
+            loc_pts += 3; loc_notes.append(f'{n_locations} office locations marked up ✓')
+        elif area_served:
+            loc_pts += 2; loc_notes.append('areaServed defined ✓')
+        else:
+            loc_notes.append('Mark up each office as its own LocalBusiness (or add areaServed)')
+        loc_pts = min(loc_pts, loc_max)
+        checks.append({'name': 'Local / Location Schema', 'weight': loc_max, 'score': loc_pts, 'max': loc_max,
+                        'status': self._pts_status(loc_pts, loc_max), 'detail': ' | '.join(loc_notes)})
+        score += loc_pts; max_score += loc_max
 
         pct = round(score / max_score * 100) if max_score else 0
         has_job_schema = any(t in ['JobPosting'] for t in schema_types) if self.mode != 'general' else False
@@ -3352,6 +3452,9 @@ class CareerSiteGrader:
         'Recruitment Content Streams': 'The #1 recruitment-SEO structure: build TWO distinct content streams — one for EMPLOYERS ("[sector] recruitment", e.g. "IT Recruitment Agency") and one for JOBSEEKERS ("[sector] jobs", e.g. "IT Jobs") — for every sector you serve. Each sector page should carry an FAQ, named consultants/specialists, JSON-LD schema, and live job listings. This captures both sides of the high-intent search market.',
         'Industry & Sector Pages': 'Dedicated pages like "Accounting Jobs" or "IT Recruitment" capture high-intent searches and are 60-80% of recruiter organic traffic. Build one SEO page per sector you recruit in, each with its own title, copy and a live job feed. Shazamme can auto-generate these.',
         'Sitemap.xml': 'An XML list of all your URLs that search engines use to discover pages. Generate /sitemap.xml automatically and submit it in Google Search Console so new jobs and pages get crawled fast.',
+        'XML Sitemap': 'An XML sitemap (or sitemap index) lists every URL so Google and Bing discover and re-crawl your pages — critical for getting new jobs indexed fast. Generate /sitemap.xml (use a sitemap index with a dedicated jobs sitemap if you have many roles), and add a "Sitemap: https://yoursite.com/sitemap.xml" line to robots.txt so crawlers find it without guessing. Submit it in Google Search Console too.',
+        'robots.txt Health': 'robots.txt controls which crawlers can read your site. The #1 catastrophic SEO mistake is an accidental "Disallow: /" that blocks the whole site (or Googlebot) — it makes you invisible to search overnight. Also never Disallow your /jobs or /careers paths, or you lose Google Jobs eligibility and job indexing. Keep robots.txt minimal, allow Googlebot/Bingbot, and include a Sitemap: directive.',
+        'Local / Location Schema': 'Google ranks recruitment agencies in the local pack and Maps using LocalBusiness/Organization structured data. Mark up each office as its own LocalBusiness with a complete PostalAddress (streetAddress, addressLocality, postalCode, addressRegion, addressCountry), geo coordinates (latitude/longitude), and areaServed. Multi-office agencies should output one LocalBusiness node per location — this is how you win "[sector] recruitment near me" and city-level searches.',
         'AI Crawler Access': 'AI engines (ChatGPT, Perplexity, Gemini, Claude) can only cite you if their crawlers are allowed in robots.txt. Make sure GPTBot, OAI-SearchBot, ClaudeBot, Google-Extended, PerplexityBot and others are not Disallowed. Add a Sitemap: line to robots.txt too.',
         'llms.txt File': 'An emerging standard (/llms.txt) — a plain-text map of your most important content for AI models, like a sitemap for LLMs. Add a markdown file at /llms.txt listing your key pages and a one-line description of each.',
         'llm-info File': 'A structured file (/.well-known/llm-info or /llm-info) telling AI models who you are, what you do, your sectors and locations, so they represent you accurately in generated answers. Add one with your brand facts. Every Shazamme site ships with this.',
