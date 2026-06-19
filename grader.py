@@ -1504,22 +1504,8 @@ class CareerSiteGrader:
             score += pts; max_score += 10
 
             # --- Form Usability (10pts) ---
-            forms = soup.find_all('form')
-            inputs = soup.find_all('input')
-            autocomplete = [i for i in inputs if i.get('autocomplete')]
-            form_pts = 0; form_notes = []
-            if forms:
-                form_pts += 5; form_notes.append(f'{len(forms)} form(s) detected')
-                if autocomplete:
-                    form_pts += 5; form_notes.append(f'{len(autocomplete)} fields with autocomplete ✓')
-                else:
-                    form_notes.append('No autocomplete attributes on inputs')
-            else:
-                form_notes.append('No forms detected')
-            form_pts = min(form_pts, 10)
-            checks.append({'name': 'Form Usability', 'weight': 10, 'score': form_pts, 'max': 10,
-                            'status': self._pts_status(form_pts, 10), 'detail': ' | '.join(form_notes)})
-            score += form_pts; max_score += 10
+            fu = self._form_usability(soup, 10)
+            checks.append(fu); score += fu['score']; max_score += fu['max']
 
         else:
             # recruitment mode (and fallback) — original logic unchanged
@@ -1627,20 +1613,8 @@ class CareerSiteGrader:
             score += pts; max_score += 10
 
             # --- Form Usability ---
-            forms = soup.find_all('form')
-            inputs = soup.find_all('input')
-            labels = soup.find_all('label')
-            autocomplete = [i for i in inputs if i.get('autocomplete')]
-            form_pts = 0; form_notes = []
-            if forms:
-                form_pts += 5; form_notes.append(f'{len(forms)} form(s) detected')
-                if autocomplete:
-                    form_pts += 5; form_notes.append(f'{len(autocomplete)} fields with autocomplete ✓')
-                else:
-                    form_notes.append('No autocomplete attributes on inputs')
-            else:
-                form_notes.append('No forms detected')
-            form_pts = min(form_pts, 10)
+            fu = self._form_usability(soup, 10)
+            form_pts = fu['score']; form_notes = [fu['detail']]
             checks.append({'name': 'Form Usability', 'weight': 10, 'score': form_pts, 'max': 10,
                             'status': self._pts_status(form_pts, 10), 'detail': ' | '.join(form_notes)})
             score += form_pts; max_score += 10
@@ -1718,6 +1692,31 @@ class CareerSiteGrader:
             pts += 1; notes.append('Heading levels skipped (e.g. H2→H4) — keep them sequential')
 
         return {'name': 'Semantic HTML & ARIA', 'weight': mx, 'score': pts, 'max': mx,
+                'status': self._pts_status(pts, mx), 'detail': ' | '.join(notes)}
+
+    def _form_usability(self, soup: BeautifulSoup, mx: int = 10) -> Dict:
+        """Form usability — recognises modern JS sites that use search/apply inputs
+        without a <form> wrapper (so we don't false-flag 'No forms')."""
+        forms = soup.find_all('form')
+        real_inputs = [i for i in soup.find_all(['input', 'select', 'textarea'])
+                       if i.get('type', 'text') not in ('hidden', 'submit', 'button', 'reset', 'image')]
+        autocomplete = [i for i in soup.find_all('input') if i.get('autocomplete')]
+        labels = soup.find_all('label')
+        pts = 0; notes = []
+        if forms:
+            pts += round(mx * 0.5); notes.append(f'{len(forms)} form(s) detected')
+        elif real_inputs:
+            pts += round(mx * 0.4); notes.append(f'{len(real_inputs)} input field(s) — JS-driven (no <form> wrapper)')
+        else:
+            notes.append('No forms or input fields detected')
+        if autocomplete:
+            pts += round(mx * 0.5); notes.append(f'{len(autocomplete)} fields with autocomplete ✓')
+        elif labels and (forms or real_inputs):
+            pts += round(mx * 0.25); notes.append(f'{len(labels)} field label(s) ✓')
+        elif forms or real_inputs:
+            notes.append('No autocomplete/labels on inputs')
+        pts = min(pts, mx)
+        return {'name': 'Form Usability', 'weight': mx, 'score': pts, 'max': mx,
                 'status': self._pts_status(pts, mx), 'detail': ' | '.join(notes)}
 
     def _detect_ats(self) -> Dict:
@@ -2215,20 +2214,8 @@ class CareerSiteGrader:
         score += font_pts; max_score += 10
 
         # --- Form Usability (8pts) ---
-        forms = soup.find_all('form')
-        labels = soup.find_all('label')
-        autocomplete = [i for i in soup.find_all('input') if i.get('autocomplete')]
-        form_pts = 0; form_notes = []
-        if forms:
-            if labels: form_pts += 4; form_notes.append(f'{len(labels)} labels ✓')
-            else: form_notes.append('Forms without labels')
-            if autocomplete: form_pts += 4; form_notes.append('Autocomplete ✓')
-        else:
-            form_pts = 4; form_notes.append('No forms on page')
-        form_pts = min(form_pts, 8)
-        checks.append({'name': 'Form Usability', 'weight': 8, 'score': form_pts, 'max': 8,
-                        'status': self._pts_status(form_pts, 8), 'detail': ' | '.join(form_notes)})
-        score += form_pts; max_score += 8
+        fu = self._form_usability(soup, 8)
+        checks.append(fu); score += fu['score']; max_score += fu['max']
 
         # --- Image Optimization (10pts) ---
         imgs = soup.find_all('img')
@@ -2658,9 +2645,11 @@ class CareerSiteGrader:
             alert_sig = bool(re.search(
                 r'job alert|email alert|notify me|get notified|job match|saved search|subscribe', page_text))
             lead_label = 'Job Alerts & Lead Capture'
+        # Either signal alone is a real (partial) lead-capture feature — score so a
+        # detected feature lands at 'warn', never a ✓-on-FAIL contradiction.
         alert_pts = 0; alert_notes = []
-        if email_inputs: alert_pts += 12; alert_notes.append(f'{len(email_inputs)} email capture(s) ✓')
-        if alert_sig: alert_pts += 8; alert_notes.append('Subscription/alert detected ✓')
+        if email_inputs: alert_pts += 10; alert_notes.append(f'{len(email_inputs)} email capture(s) ✓')
+        if alert_sig: alert_pts += 10; alert_notes.append('Subscription/alert detected ✓')
         else:
             if self.mode == 'general':
                 alert_notes.append('No newsletter/subscribe — missing lead capture opportunity')
