@@ -445,6 +445,18 @@ class CareerSiteGrader:
                    'sector_jsonld': 0, 'sector_jobs': 0,
                    'examples_employer': [], 'examples_jobseeker': []}
 
+        def _phrase_intent(text):
+            """Return ('emp'|'seek'|'both'|None, emp_match, seek_match) for a string."""
+            e = self.EMP_PHRASE.search(text)
+            s = self.SEEK_PHRASE.search(text)
+            if e and s:
+                return 'both', e, s
+            if e:
+                return 'emp', e, None
+            if s:
+                return 'seek', None, s
+            return None, None, None
+
         def _classify_stream(url, title, h1txt, types, soup):
             path = urlparse(url).path.lower()
             # Exclude blog/news/insight/article pages and individual job postings —
@@ -452,34 +464,56 @@ class CareerSiteGrader:
             if re.search(r'insight|/blog|/news|/article|/guide|/resource|case.?stud|/press|'
                          r'/event|/stor(y|ies)|/advice|/tips|/faq', path):
                 return
+            # Individual job ads, drafts/test pages, and paginated index pages
+            # (/jobs/mining/2/) are not canonical sector landing pages.
             if 'JobPosting' in types or re.search(r'-\d{4,}/?$', path):
                 return
-            # STRICT, single-assignment: a page ranks for ONE intent — either
-            # "[sector] recruitment" (employer) or "[sector] jobs" (jobseeker).
-            # Decide from the most authoritative source first (title → H1 → slug);
-            # the first source that gives a clear answer wins. A page that crams
-            # both phrases is assigned to employer (the rarer, higher-value term)
-            # and is itself an SEO compromise (one page can't own two intents).
-            emp_m = seek_m = None
-            for src in (title.lower(), h1txt.lower(), re.sub(r'[-/_]', ' ', path)):
-                e = self.EMP_PHRASE.search(src)
-                s = self.SEEK_PHRASE.search(src)
-                if e and not s:
-                    emp_m = e; break
-                if s and not e:
-                    seek_m = s; break
-                if e and s:
-                    emp_m = e; break
-            if not (emp_m or seek_m):
+            if re.search(r'draft|/wip\b|/tmp\b|/test\b|/preview|/staging|/sandbox', path):
                 return
+            if re.search(r'/\d{1,3}/?$', path):   # pagination shells duplicate the sector page
+                return
+            # The URL slug is the page's CANONICAL, permanent identity and what
+            # search engines rank — it WINS. A page at /industries/mining-jobs/ is a
+            # "mining jobs" (jobseeker) page even if its H1 reads "Mining Recruitment".
+            # Only when the slug carries no decisive phrase do we consult title → H1.
+            slug = re.sub(r'[-/_]+', ' ', path).strip()
+            # Path context disambiguates a slug that crams BOTH phrases.
+            if re.search(r'/employ|/client|/hir(e|ing)|/our.?service|/for.?business|'
+                         r'/recruitment.?solution|/partner', path):
+                ctx = 'emp'
+            elif re.search(r'/job|/vacanc|/candidate|/career|/seeker|/talent.?search', path):
+                ctx = 'seek'
+            else:
+                ctx = None
+
+            intent, emp_m, seek_m = _phrase_intent(slug)
+            if intent is None:
+                # Slug gives no verdict — fall back to title then H1 (the page may
+                # target a phrase its URL fails to encode, itself a minor SEO weakness).
+                for src in (title.lower(), h1txt.lower()):
+                    intent, emp_m, seek_m = _phrase_intent(src)
+                    if intent:
+                        break
+            if intent is None:
+                return
+            # Resolve a both-phrase page to a SINGLE intent via path context; a page
+            # that targets both is itself an SEO compromise (one page can't own two
+            # intents) — default to jobseeker, the higher-volume literal term.
+            if intent == 'both':
+                if ctx == 'emp':
+                    intent, seek_m = 'emp', None
+                else:
+                    intent, emp_m = 'seek', None
 
             def _sector_of(m):
+                if not m:
+                    return ''
                 for g in m.groups():
                     if g and re.fullmatch(self.SECTOR_WORDS, g, re.I):
                         return g.strip().lower().replace(' ', '-')
                 return ''
 
-            is_emp, is_seek = bool(emp_m), bool(seek_m)
+            is_emp, is_seek = intent == 'emp', intent == 'seek'
             streams['sector_pages'] += 1
             # richness signals on the sector page
             if (types & {'FAQPage', 'QAPage'}) or soup.find(class_=re.compile(r'faq|accordion', re.I)):
@@ -1360,15 +1394,28 @@ class CareerSiteGrader:
         pts = 0; notes = []
 
         # 1. Two distinct audience streams (10 pts) — the headline factor.
-        if emp and seek:
+        # A real "stream" is a SET of sector pages (>=2); a lone page isn't a stream.
+        emp_real, seek_real = emp >= 2, seek >= 2
+        if emp_real and seek_real:
             pts += 10
             notes.append(f'Both streams ✓ — {emp} employer ("[sector] recruitment") + '
                          f'{seek} jobseeker ("[sector] jobs") pages')
-        elif emp or seek:
+        elif (emp and seek):
+            pts += 7
+            thin = 'employer' if emp < 2 else 'jobseeker'
+            notes.append(f'Both streams present but the {thin} stream is thin '
+                         f'({emp} employer / {seek} jobseeker pages) — build it out across more sectors')
+        elif emp_real or seek_real:
             pts += 4
-            have, missing = (('employer', 'jobseeker "[sector] jobs"') if emp
-                             else ('jobseeker', 'employer "[sector] recruitment"'))
-            notes.append(f'Only the {have} stream found — add the {missing} stream')
+            have, missing = (('employer "[sector] recruitment"', 'jobseeker "[sector] jobs"') if emp_real
+                             else ('jobseeker "[sector] jobs"', 'employer "[sector] recruitment"'))
+            notes.append(f'Only the {have} stream found ({max(emp, seek)} pages) — '
+                         f'you are missing the {missing} stream entirely')
+        elif emp or seek:
+            pts += 2
+            which = 'employer "[sector] recruitment"' if emp else 'jobseeker "[sector] jobs"'
+            notes.append(f'Just one {which} page — neither stream is built out; '
+                         'create "[sector] recruitment" (employers) AND "[sector] jobs" (jobseekers) pages per sector')
         else:
             notes.append('No sector content streams — build "[sector] recruitment" (for employers) '
                          'AND "[sector] jobs" (for jobseekers)')
