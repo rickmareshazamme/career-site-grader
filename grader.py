@@ -400,22 +400,26 @@ class CareerSiteGrader:
     CRAWL_CEILING = 1500
     PRIORITY_SOUPS = 25  # full soups kept in memory for the detailed checks
 
-    # The core recruitment-SEO structure: distinct content streams targeting
-    # employers ("[sector] recruitment") AND jobseekers ("[sector] jobs"), each
-    # ideally carrying FAQ, named consultants, JSON-LD schema, and live jobs.
-    SECTOR_RE = re.compile(
-        r'accounting|finance|financial|banking|insurance|technolog|\btech\b|software|digital|'
-        r'\bdata\b|engineer|construction|infrastructure|civil|healthcare|health.?care|medical|'
-        r'nursing|clinical|pharmaceutic|pharma|life.?science|legal|\blaw\b|marketing|creative|'
-        r'design|\bmedia\b|manufactur|industrial|retail|\bfmcg\b|\bsales\b|education|teaching|'
-        r'administrat|executive|logistics|supply.?chain|procurement|warehous|mining|resources|'
-        r'energy|oil.?&.?gas|property|real.?estate|facilities|hospitality|tourism|science|'
-        r'government|public.?sector|agricultur|human.?resources|\bhr\b|\bit\b', re.I)
-    EMPLOYER_RE = re.compile(
-        r'recruit|staffing|recruiting|talent.?solution|workforce.?solution|hir(e|ing)|'
-        r'employer|client|for.?business|find.?(staff|talent|candidates)', re.I)
-    JOBSEEKER_RE = re.compile(
-        r'\bjobs?\b|vacanc|careers?|\broles?\b|positions?|opportunit|find.?(a.?)?job|search.?jobs', re.I)
+    # THE core recruitment-SEO structure: pages whose TITLE/H1/slug literally say
+    # "[sector] recruitment" (employer keyword) and "[sector] jobs" (jobseeker
+    # keyword). Search engines rank on the exact phrase — naming an employer page
+    # "[sector] jobs" (or burying it under /industries/) wastes the ranking.
+    SECTOR_WORDS = (
+        r'accounting|finance|financial|banking|insurance|technolog\w*|software|digital|'
+        r'engineer\w*|construction|infrastructure|civil|healthcare|health.?care|medical|'
+        r'nursing|clinical|pharmaceutic\w*|pharma|life.?science\w*|legal|marketing|creative|'
+        r'design|manufactur\w*|industrial|retail|\bfmcg\b|sales|education|teaching|'
+        r'administrat\w*|executive|logistics|supply.?chain|procurement|warehous\w*|mining|'
+        r'energy|property|real.?estate|facilities|hospitality|tourism|science|'
+        r'government|public.?sector|agricultur\w*|human.?resources|\bhr\b|\bit\b|\btech\b')
+    # "[sector] recruitment" (or recruitment/staffing of [sector])
+    EMP_PHRASE = re.compile(
+        r'(' + SECTOR_WORDS + r')[\s]{0,3}(recruit\w*|staffing|talent.?solution)|'
+        r'(recruit\w*|staffing)[\s]{0,3}(' + SECTOR_WORDS + r')', re.I)
+    # "[sector] jobs" (or jobs/vacancies/careers in [sector])
+    SEEK_PHRASE = re.compile(
+        r'(' + SECTOR_WORDS + r')[\s]{0,3}(jobs?|vacanc\w*|careers?|roles?|positions?)|'
+        r'(jobs?|vacanc\w*|careers?)[\s]{0,3}(in|for)?[\s]{0,3}(' + SECTOR_WORDS + r')', re.I)
 
     async def _fetch_recruitment_pages(self):
         """TRUE full-site crawl: fetch EVERY page in the sitemap (up to a ceiling),
@@ -443,35 +447,39 @@ class CareerSiteGrader:
 
         def _classify_stream(url, title, h1txt, types, soup):
             path = urlparse(url).path.lower()
-            # Exclude blog/news/insight/article pages — not stream LANDING pages.
+            # Exclude blog/news/insight/article pages and individual job postings —
+            # we evaluate sector LANDING pages, not articles or single job ads.
             if re.search(r'insight|/blog|/news|/article|/guide|/resource|case.?stud|/press|'
                          r'/event|/stor(y|ies)|/advice|/tips|/faq', path):
                 return
-            # Exclude individual job postings (JobPosting schema or numeric-id slug) —
-            # we count sector LANDING pages, not single job ads.
             if 'JobPosting' in types or re.search(r'-\d{4,}/?$', path):
                 return
-            label = f'{title} {h1txt}'.lower()
-            hay = f'{path} {label}'
-            sector_m = self.SECTOR_RE.search(hay)
-            if not sector_m:
+            # STRICT, single-assignment: a page ranks for ONE intent — either
+            # "[sector] recruitment" (employer) or "[sector] jobs" (jobseeker).
+            # Decide from the most authoritative source first (title → H1 → slug);
+            # the first source that gives a clear answer wins. A page that crams
+            # both phrases is assigned to employer (the rarer, higher-value term)
+            # and is itself an SEO compromise (one page can't own two intents).
+            emp_m = seek_m = None
+            for src in (title.lower(), h1txt.lower(), re.sub(r'[-/_]', ' ', path)):
+                e = self.EMP_PHRASE.search(src)
+                s = self.SEEK_PHRASE.search(src)
+                if e and not s:
+                    emp_m = e; break
+                if s and not e:
+                    seek_m = s; break
+                if e and s:
+                    emp_m = e; break
+            if not (emp_m or seek_m):
                 return
-            sector = sector_m.group(0)
-            # PATH-aware stream disambiguation first (most reliable), then keywords.
-            seek_path = bool(re.search(r'/(jobs?|vacanc\w*|careers?|roles?|positions?)(/|$)', path))
-            emp_path = bool(re.search(r'/(industr\w*|sectors?|recruit\w*|staffing|employers?|clients?|'
-                                      r'business|hiring|services?|solutions?)(/|-|$)', path))
-            is_seek = seek_path or (not emp_path and bool(self.JOBSEEKER_RE.search(label)))
-            is_emp = emp_path or (not seek_path and bool(self.EMPLOYER_RE.search(label)))
-            # If both path signals fire (e.g. /industries/legal-jobs/), the section
-            # path wins: /industries|/recruitment = employer; /jobs/ = jobseeker.
-            if seek_path and emp_path:
-                if re.search(r'/(jobs?|vacanc\w*|careers?)(/|$)', path):
-                    is_emp = False
-                else:
-                    is_seek = False
-            if not (is_emp or is_seek):
-                return
+
+            def _sector_of(m):
+                for g in m.groups():
+                    if g and re.fullmatch(self.SECTOR_WORDS, g, re.I):
+                        return g.strip().lower().replace(' ', '-')
+                return ''
+
+            is_emp, is_seek = bool(emp_m), bool(seek_m)
             streams['sector_pages'] += 1
             # richness signals on the sector page
             if (types & {'FAQPage', 'QAPage'}) or soup.find(class_=re.compile(r'faq|accordion', re.I)):
@@ -485,12 +493,12 @@ class CareerSiteGrader:
                 streams['sector_jobs'] += 1
             if is_emp:
                 streams['employer_pages'] += 1
-                emp_sectors.add(sector)
+                emp_sectors.add(_sector_of(emp_m))
                 if len(streams['examples_employer']) < 4:
                     streams['examples_employer'].append(self._short_path(url))
             if is_seek:
                 streams['jobseeker_pages'] += 1
-                seek_sectors.add(sector)
+                seek_sectors.add(_sector_of(seek_m))
                 if len(streams['examples_jobseeker']) < 4:
                     streams['examples_jobseeker'].append(self._short_path(url))
 
