@@ -1888,6 +1888,13 @@ function copyLink() {
   const modeParam = params.get('mode');
   const validModes = ['recruitment', 'career_site', 'general'];
 
+  // Clickable cache-bypass: ?fresh=1&token=… opens the UI and grades fresh
+  if (params.get('fresh') === '1') {
+    const t = (params.get('token') || '').trim();
+    if (t) localStorage.setItem('grader_admin_token', t);
+    const fc = $('fresh-check'); if (fc) fc.checked = true;
+  }
+
   if (modeParam && validModes.includes(modeParam)) {
     selectMode(modeParam);
   }

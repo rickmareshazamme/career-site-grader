@@ -59,6 +59,8 @@ class CareerSiteGrader:
         self.extra_soups: Dict[str, BeautifulSoup] = {}
         self.job_routes_found: List[str] = []
         self.pages_scanned: List[str] = []   # extra pages fetched beyond the homepage
+        self.total_pages = 0                 # total page count from the sitemap
+        self.coverage: Dict[str, Any] = {}   # site-wide schema coverage (e.g. FAQ on X/Y)
         # Parsed JSON-LD cache
         self._schema_objects: Optional[List[dict]] = None
         self._schema_parse_errors = 0
@@ -196,6 +198,7 @@ class CareerSiteGrader:
             'cwv_attempted': self.cwv_attempted,
             'authority': self.authority,
             'pages_scanned': ['homepage'] + list(dict.fromkeys(self.pages_scanned)),
+            'coverage': self._get_coverage(),
             'mode': self.mode,
             'progress': 100,
         }
@@ -381,12 +384,10 @@ class CareerSiteGrader:
             ssl_ctx = ssl.create_default_context()
             ssl_ctx.check_hostname = False
             ssl_ctx.verify_mode = ssl.CERT_NONE
-            connector = aiohttp.TCPConnector(ssl=ssl_ctx, limit=10)
+            connector = aiohttp.TCPConnector(ssl=ssl_ctx, limit=12)
             timeout = aiohttp.ClientTimeout(total=15, sock_read=8)
 
             async with aiohttp.ClientSession(connector=connector, timeout=timeout) as sess:
-                discovered = await self._discover_content_pages(sess)
-
                 async def fetch_one(path, is_job):
                     url = path if path.startswith('http') else urljoin(self.base_url, path)
                     if path in self.extra_html:
@@ -404,21 +405,31 @@ class CareerSiteGrader:
                     except Exception:
                         pass
 
+                # Full sitemap → total page count + a coverage sample.
+                sitemap_urls = await self._sitemap_urls(sess)
+                self.total_pages = len(sitemap_urls)
+                # Prioritise content-rich pages (FAQ/about/sector/service/job), then fill.
+                pat = re.compile(r'faq|frequently.asked|about|service|sector|specialis|industr|job|career', re.I)
+                priority = [u for u in sitemap_urls if pat.search(u)]
+                rest = [u for u in sitemap_urls if u not in priority]
+                COVERAGE_CAP = 40  # max pages fetched per grade
+                sample = (priority + rest)[:COVERAGE_CAP]
+
                 tasks = ([fetch_one(p, True) for p in job_paths]
                          + [fetch_one(p, False) for p in content_paths]
-                         + [fetch_one(u, False) for u in discovered])
+                         + [fetch_one(u, False) for u in sample])
                 await asyncio.gather(*tasks)
         except Exception:
             pass
 
-    async def _discover_content_pages(self, sess) -> List[str]:
-        """Find FAQ/about/sector/service URLs in the sitemap so their page-level
-        schema (FAQPage, etc.) is included in the scan. Bounded + best-effort."""
-        pat = re.compile(r'faq|frequently.asked|about|service|sector|specialis|industr', re.I)
-        found: List[str] = []
+    async def _sitemap_urls(self, sess) -> List[str]:
+        """Return every page URL from the sitemap (following a sitemap index).
+        Bounded + best-effort."""
+        urls: List[str] = []
+        seen = set()
+        sm_timeout = aiohttp.ClientTimeout(total=10)
         try:
-            sm_timeout = aiohttp.ClientTimeout(total=8)
-            for sm in ('/sitemap.xml', '/sitemap_index.xml', '/sitemap-index.xml'):
+            for sm in ('/sitemap.xml', '/sitemap_index.xml', '/sitemap-index.xml', '/sitemap'):
                 try:
                     async with sess.get(urljoin(self.base_url, sm), headers=self.HEADERS,
                                         timeout=sm_timeout) as resp:
@@ -428,27 +439,26 @@ class CareerSiteGrader:
                 except Exception:
                     continue
                 locs = re.findall(r'<loc>\s*([^<\s]+)\s*</loc>', body)
-                # Sitemap index → peek into the first couple of child sitemaps
                 if '<sitemapindex' in body.lower():
-                    child_locs = []
-                    for child in locs[:3]:
+                    child_sitemaps = locs[:25]  # bound the number of child sitemaps
+                    for child in child_sitemaps:
                         try:
                             async with sess.get(child, headers=self.HEADERS, timeout=sm_timeout) as cr:
                                 if cr.status == 200:
-                                    child_locs += re.findall(r'<loc>\s*([^<\s]+)\s*</loc>', await cr.text())
+                                    for u in re.findall(r'<loc>\s*([^<\s]+)\s*</loc>', await cr.text()):
+                                        if u not in seen:
+                                            seen.add(u); urls.append(u.strip())
                         except Exception:
                             continue
-                    locs = child_locs
-                for loc in locs:
-                    if pat.search(loc) and loc not in found:
-                        found.append(loc.strip())
-                    if len(found) >= 6:
-                        break
-                if found:
+                else:
+                    for u in locs:
+                        if u not in seen:
+                            seen.add(u); urls.append(u.strip())
+                if urls:
                     break
         except Exception:
             pass
-        return found[:6]
+        return urls
 
     async def _fetch_pagespeed(self):
         """Google PageSpeed Insights v5 — Lighthouse lab metrics + CrUX field
@@ -606,6 +616,67 @@ class CareerSiteGrader:
             elif t:
                 types.append(str(t))
         return types
+
+    def _soup_schema_types(self, soup) -> List[str]:
+        """Schema @types present on a SINGLE page (for per-page coverage)."""
+        types: List[str] = []
+        for script in soup.find_all('script', type='application/ld+json'):
+            raw = (script.string or script.get_text() or '').strip()
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except Exception:
+                continue
+            nodes: List[dict] = []
+            self._flatten_nodes(data, nodes)
+            for n in nodes:
+                t = n.get('@type', '')
+                if isinstance(t, list):
+                    types.extend(str(x) for x in t)
+                elif t:
+                    types.append(str(t))
+        return types
+
+    def _get_coverage(self) -> Dict:
+        """Site-wide schema coverage across every scanned page: how many pages
+        carry FAQ / JobPosting / Organization / Breadcrumb schema."""
+        if self.coverage:
+            return self.coverage
+        soups = self._all_soups()
+        faq = job = org = crumb = 0
+        for s in soups:
+            t = set(self._soup_schema_types(s))
+            if t & {'FAQPage', 'QAPage'}:
+                faq += 1
+            if 'JobPosting' in t:
+                job += 1
+            if t & {'Organization', 'Corporation', 'EmploymentAgency', 'StaffingAgency',
+                    'RecruitmentAgency', 'LocalBusiness'}:
+                org += 1
+            if 'BreadcrumbList' in t:
+                crumb += 1
+        checked = len(soups)
+        self.coverage = {
+            'pages_checked': checked,
+            'total_pages': self.total_pages or checked,
+            'faq_pages': faq,
+            'jobposting_pages': job,
+            'organization_pages': org,
+            'breadcrumb_pages': crumb,
+        }
+        return self.coverage
+
+    def _coverage_phrase(self, count: int, label: str) -> str:
+        """e.g. 'FAQPage schema on 13 of 40 pages' (or '… of 40 sampled (212 in sitemap)')."""
+        cov = self._get_coverage()
+        checked = cov['pages_checked']
+        total = cov['total_pages']
+        if total and total <= checked:
+            return f'{label} on {count} of {total} pages'
+        if total and total > checked:
+            return f'{label} on {count} of {checked} pages sampled ({total} in sitemap)'
+        return f'{label} on {count} of {checked} pages scanned'
 
     def _find_schema_node(self, *type_names) -> Optional[dict]:
         wanted = {t.lower() for t in type_names}
@@ -1195,14 +1266,20 @@ class CareerSiteGrader:
             if not faq_heading and s.find(lambda t: t.name in ['h2', 'h3'] and
                                           re.search(r'faq|frequen|question', t.get_text(), re.I)):
                 faq_heading = True
-        n_pages = 1 + len(self.extra_soups)
+        cov = self._get_coverage()
+        faq_count = cov['faq_pages']
         faq_pts = 0; faq_notes = []
         if has_faq_schema:
-            faq_pts += 15; faq_notes.append('FAQPage schema ✓ — eligible for Google FAQ rich results')
+            faq_pts += 15
+            faq_notes.append(self._coverage_phrase(faq_count, 'FAQPage schema') + ' ✓')
+            # Reward broader coverage; nudge if only a few pages have it.
+            checked = cov['pages_checked']
+            if checked >= 3 and faq_count <= max(1, checked // 4):
+                faq_notes.append('only a small share of pages — add FAQPage schema to more pages')
         else:
-            faq_notes.append(f'No FAQPage schema on the {n_pages} page(s) scanned — wrap your FAQ content in FAQPage JSON-LD')
+            faq_notes.append(self._coverage_phrase(0, 'No FAQPage schema') + ' — wrap your FAQ content in FAQPage JSON-LD')
         if faq_html or faq_heading:
-            faq_pts += 5; faq_notes.append('FAQ content detected ✓ — add FAQPage schema to it')
+            faq_pts += 5; faq_notes.append('FAQ content detected ✓')
         faq_pts = min(faq_pts, 20)
         checks.append({'name': 'FAQ & Q&A Schema', 'weight': 20, 'score': faq_pts, 'max': 20,
                         'status': self._pts_status(faq_pts, 20), 'detail': ' | '.join(faq_notes)})
