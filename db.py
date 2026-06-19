@@ -31,7 +31,8 @@ def _connect():
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA journal_mode=WAL')
-    conn.execute('PRAGMA busy_timeout=5000')
+    conn.execute('PRAGMA busy_timeout=15000')
+    conn.execute('PRAGMA synchronous=NORMAL')
     return conn
 
 
@@ -112,22 +113,28 @@ def save_grade(url: str, domain: str, mode: str, overall: int, grade: str,
         return None
 
 
-def percentile(mode: str, score: int) -> Optional[Dict]:
-    """Where this score sits among all grades of the same mode."""
+def percentile(mode: str, score: int, domain: str = '') -> Optional[Dict]:
+    """Where this score sits among OTHER sites of the same mode. Dedupes to the
+    latest grade per domain (so repeat grades of one site don't skew the field)
+    and excludes the site being graded."""
     if not _ENABLED:
         return None
     try:
+        # Peer distribution = latest grade per domain, excluding this domain.
+        sql = (
+            'SELECT overall FROM grades WHERE mode=? AND domain<>? AND id IN '
+            '(SELECT MAX(id) FROM grades WHERE mode=? AND domain<>? GROUP BY domain)'
+        )
         with _LOCK, _connect() as conn:
-            row = conn.execute('SELECT COUNT(*) n, '
-                               'SUM(CASE WHEN overall < ? THEN 1 ELSE 0 END) below, '
-                               'AVG(overall) avg FROM grades WHERE mode=?',
-                               (score, mode)).fetchone()
-        n = row['n'] or 0
-        if n < 8:  # not enough data to be meaningful yet
+            rows = conn.execute(sql, (mode, domain, mode, domain)).fetchall()
+        overalls = [r['overall'] for r in rows if r['overall'] is not None]
+        n = len(overalls)
+        if n < 8:  # not enough peers to be meaningful yet
             return {'sample': n, 'ready': False}
-        pct = round((row['below'] or 0) / n * 100)
-        return {'sample': n, 'ready': True, 'percentile': pct,
-                'average': round(row['avg'] or 0), 'beats_pct': pct}
+        below = sum(1 for o in overalls if o < score)
+        pct = round(below / n * 100)
+        avg = round(sum(overalls) / n)
+        return {'sample': n, 'ready': True, 'percentile': pct, 'average': avg, 'beats_pct': pct}
     except Exception:
         return None
 
@@ -139,11 +146,25 @@ def history(domain: str, mode: str, limit: int = 24) -> List[Dict]:
         with _LOCK, _connect() as conn:
             rows = conn.execute(
                 'SELECT overall, grade, created_at FROM grades '
-                'WHERE domain=? AND mode=? ORDER BY created_at ASC LIMIT ?',
+                'WHERE domain=? AND mode=? ORDER BY created_at DESC LIMIT ?',
                 (domain, mode, limit)).fetchall()
-        return [{'overall': r['overall'], 'grade': r['grade'], 'at': r['created_at']} for r in rows]
+        return [{'overall': r['overall'], 'grade': r['grade'], 'at': r['created_at']} for r in reversed(rows)]
     except Exception:
         return []
+
+
+def url_graded(url: str, mode: str) -> bool:
+    """Has this exact URL been graded? Gate for the billable /api/cwv PSI spawn.
+    Degrades open (True) if the DB is unavailable."""
+    if not _ENABLED:
+        return True
+    try:
+        with _LOCK, _connect() as conn:
+            r = conn.execute('SELECT 1 FROM grades WHERE url=? AND mode=? LIMIT 1',
+                             (url, mode)).fetchone()
+        return bool(r)
+    except Exception:
+        return True
 
 
 def save_lead(email: str, url: str, mode: str, overall: Optional[int]) -> bool:

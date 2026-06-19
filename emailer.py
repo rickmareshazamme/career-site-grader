@@ -13,8 +13,13 @@ Env:
 
 import os
 import json
+import html
 import urllib.request
 import urllib.error
+
+
+def _esc(v) -> str:
+    return html.escape(str(v if v is not None else ''), quote=True)
 
 API_URL = 'https://api.sendgrid.com/v3/mail/send'
 
@@ -76,20 +81,20 @@ def send_report_email(to: str, url: str, mode: str, overall: int, grade: str,
     fixes_html = ''
     if top_fixes:
         items = ''.join(
-            f'<li style="margin-bottom:10px"><strong>{f.get("title","")}</strong> '
-            f'<span style="color:#b4b4c4">— {f.get("how_to_fix","")}</span></li>'
+            f'<li style="margin-bottom:10px"><strong>{_esc(f.get("title",""))}</strong> '
+            f'<span style="color:#b4b4c4">— {_esc(f.get("how_to_fix",""))}</span></li>'
             for f in top_fixes[:3])
         fixes_html = (f'<p style="font-weight:700;margin:24px 0 8px">Top 3 things to fix first</p>'
                       f'<ul style="padding-left:18px;color:#f1f1f6;line-height:1.5">{items}</ul>')
     inner = (
         f'<p style="font-size:13px;color:#b4b4c4;margin:0 0 6px">Your grade for</p>'
-        f'<p style="font-size:20px;font-weight:700;margin:0 0 18px">{url}</p>'
+        f'<p style="font-size:20px;font-weight:700;margin:0 0 18px">{_esc(url)}</p>'
         f'<div style="display:inline-block;background:{colour}22;border:2px solid {colour}55;'
         f'border-radius:14px;padding:16px 26px;text-align:center">'
         f'<div style="font-size:40px;font-weight:800;color:{colour};line-height:1">{overall}</div>'
         f'<div style="font-size:13px;color:#b4b4c4">out of 100 · grade {grade}</div></div>'
         f'{fixes_html}'
-        f'<p style="margin:26px 0"><a href="{report_link}" '
+        f'<p style="margin:26px 0"><a href="{_esc(report_link)}" '
         f'style="background:linear-gradient(120deg,#8b5cf6,#6366f1);color:#fff;text-decoration:none;'
         f'padding:13px 22px;border-radius:10px;font-weight:600">View your full report</a></p>'
     )
@@ -110,11 +115,11 @@ def send_monitor_digest(to: str, url: str, overall: int, grade: str,
     colour = _grade_colour(overall)
     inner = (
         f'<p style="font-size:13px;color:#b4b4c4;margin:0 0 6px">Monthly re-score for</p>'
-        f'<p style="font-size:20px;font-weight:700;margin:0 0 18px">{url}</p>'
+        f'<p style="font-size:20px;font-weight:700;margin:0 0 18px">{_esc(url)}</p>'
         f'<div style="font-size:40px;font-weight:800;color:{colour}">{overall}<span '
         f'style="font-size:16px;color:#b4b4c4"> /100 · {grade}</span></div>'
         f'<p style="margin:6px 0 0">{trend}</p>'
-        f'<p style="margin:24px 0"><a href="{report_link}" '
+        f'<p style="margin:24px 0"><a href="{_esc(report_link)}" '
         f'style="background:linear-gradient(120deg,#8b5cf6,#6366f1);color:#fff;text-decoration:none;'
         f'padding:13px 22px;border-radius:10px;font-weight:600">See what changed</a></p>'
     )

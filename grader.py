@@ -61,6 +61,8 @@ class CareerSiteGrader:
         self.pages_scanned: List[str] = []   # extra pages fetched beyond the homepage
         self.total_pages = 0                 # total page count from the sitemap
         self.coverage: Dict[str, Any] = {}   # site-wide schema coverage (e.g. FAQ on X/Y)
+        self._home_fp: Optional[str] = None  # homepage content fingerprint (soft-404 guard)
+        self._seen_fps: set = set()          # fingerprints of stored pages (dedup)
         # Parsed JSON-LD cache
         self._schema_objects: Optional[List[dict]] = None
         self._schema_parse_errors = 0
@@ -225,10 +227,25 @@ class CareerSiteGrader:
                     self.parsed = urlparse(self.url)
                     self.base_url = f"{self.parsed.scheme}://{self.parsed.netloc}"
             self.soup = BeautifulSoup(self.html, 'html.parser')
+            # Don't grade an error/blocked page as if it were the real site.
+            if self.status_code >= 400:
+                self.errors.append(f'Site returned HTTP {self.status_code} for {self.url}')
+                return False
+            self._home_fp = self._fingerprint(self.soup)
             return True
         except Exception as e:
             self.errors.append(str(e))
             return False
+
+    def _fingerprint(self, soup: Optional[BeautifulSoup]) -> str:
+        """Content fingerprint to detect soft-404s / duplicate homepage shells
+        (Duda/SPA sites return 200 + the homepage for unknown paths)."""
+        if not soup:
+            return ''
+        import hashlib
+        title = (soup.find('title').get_text() if soup.find('title') else '')
+        text = re.sub(r'\s+', ' ', soup.get_text(' ', strip=True))[:5000]
+        return hashlib.sha1((title + '|' + text).encode('utf-8', 'replace')).hexdigest()
 
     async def _fetch_authority(self):
         """Real off-site authority (backlinks / referring domains / domain rank)
@@ -397,8 +414,14 @@ class CareerSiteGrader:
                             if resp.status == 200:
                                 html = await resp.text(encoding='utf-8', errors='replace')
                                 if len(html) > 500:
+                                    page_soup = BeautifulSoup(html, 'html.parser')
+                                    fp = self._fingerprint(page_soup)
+                                    # Skip soft-404s / duplicate homepage shells.
+                                    if fp == self._home_fp or fp in self._seen_fps:
+                                        return
+                                    self._seen_fps.add(fp)
                                     self.extra_html[path] = html
-                                    self.extra_soups[path] = BeautifulSoup(html, 'html.parser')
+                                    self.extra_soups[path] = page_soup
                                     if is_job:
                                         self.job_routes_found.append(path)
                                     self.pages_scanned.append(path)
@@ -507,7 +530,11 @@ class CareerSiteGrader:
 
         def field(metric):
             m = le.get(metric, {})
-            return {'p75': m.get('percentile'), 'rating': m.get('category')}  # FAST/AVERAGE/SLOW
+            p75 = m.get('percentile')
+            # CrUX returns CLS as an integer ×100 (0.10 -> 10); normalise it.
+            if p75 is not None and 'CUMULATIVE_LAYOUT_SHIFT' in metric:
+                p75 = round(p75 / 100, 3)
+            return {'p75': p75, 'rating': m.get('category')}  # FAST/AVERAGE/SLOW
 
         result = {
             'perf_score': cat_score('performance'),
@@ -2703,12 +2730,10 @@ class CareerSiteGrader:
                 if frac is not None:
                     cwv_pts += frac * 8; cwv_notes.append(note); has_data = True
             # CLS
-            cls_field = field.get('cls', {}).get('p75')
+            cls_field = field.get('cls', {}).get('p75')  # already normalised in _parse_pagespeed
             cls_val = cls_field if cls_field is not None else lab.get('cls')
             if cls_val is not None:
-                # CrUX returns CLS*100 in percentile; lab returns raw — normalise
-                cls_norm = cls_val / 100 if cls_field is not None else cls_val
-                frac, note = rate_metric('CLS', cls_norm, 0.1, 0.25, unit='score')
+                frac, note = rate_metric('CLS', cls_val, 0.1, 0.25, unit='score')
                 cwv_pts += frac * 8; cwv_notes.append(note); has_data = True
 
             if has_data:
@@ -3363,7 +3388,7 @@ class CareerSiteGrader:
 
         features = []
 
-        if all_checks.get('Schema / Structured Data') != 'pass':
+        if all_checks.get('Schema / Structured Data') == 'fail':
             features.append({
                 'gap': 'Missing or weak schema markup',
                 'feature': 'Auto Schema Engine',
@@ -3372,7 +3397,7 @@ class CareerSiteGrader:
                 'stat': '3× higher CTR from rich snippets',
             })
 
-        if all_checks.get('Apply Flow & Job Search') != 'pass':
+        if all_checks.get('Apply Flow & Job Search') == 'fail':
             if self.mode == 'career_site':
                 features.append({
                     'gap': 'Weak or broken application flow',
@@ -3395,7 +3420,7 @@ class CareerSiteGrader:
             all_checks.get('Job Alerts & Lead Capture')
             or all_checks.get('Lead Capture / Newsletter')
         )
-        if alerts_check != 'pass':
+        if alerts_check == 'fail':
             features.append({
                 'gap': 'No job alerts or lead capture',
                 'feature': 'Intelligent Job Alert Engine',
@@ -3404,7 +3429,7 @@ class CareerSiteGrader:
                 'stat': 'Re-engages 4× more passive candidates',
             })
 
-        if all_checks.get('Live Chat & Chatbot') != 'pass':
+        if all_checks.get('Live Chat & Chatbot') == 'fail':
             features.append({
                 'gap': 'No chatbot or live engagement',
                 'feature': 'AI Recruitment Chatbot',
@@ -3413,7 +3438,7 @@ class CareerSiteGrader:
                 'stat': 'Reduces drop-off by up to 40%',
             })
 
-        if all_checks.get('AI Crawler Access') != 'pass' or not self.has_llms_txt or not self.llm_info_url:
+        if all_checks.get('AI Crawler Access') == 'fail' or not self.has_llms_txt or not self.llm_info_url:
             features.append({
                 'gap': 'Invisible to AI search engines',
                 'feature': 'GEO-Ready Out of the Box',
@@ -3422,7 +3447,7 @@ class CareerSiteGrader:
                 'stat': 'Ranks in AI-generated job search answers',
             })
 
-        if all_checks.get('Mobile Readiness') != 'pass':
+        if all_checks.get('Mobile Readiness') == 'fail':
             features.append({
                 'gap': 'Poor mobile experience',
                 'feature': 'Mobile-First Architecture',
@@ -3431,7 +3456,7 @@ class CareerSiteGrader:
                 'stat': '95+ Google Mobile Speed Score',
             })
 
-        if all_checks.get('Video Content') != 'pass':
+        if all_checks.get('Video Content') == 'fail':
             features.append({
                 'gap': 'No employer brand video',
                 'feature': 'Employer Brand Content Studio',
@@ -3440,7 +3465,7 @@ class CareerSiteGrader:
                 'stat': '+34% application intent with video',
             })
 
-        if all_checks.get('EVP & Pay Transparency') != 'pass':
+        if all_checks.get('EVP & Pay Transparency') == 'fail':
             features.append({
                 'gap': 'Weak EVP and pay transparency',
                 'feature': 'EVP & Transparency Framework',
@@ -3449,7 +3474,7 @@ class CareerSiteGrader:
                 'stat': '2× candidate quality with transparent EVP',
             })
 
-        if self.mode == 'recruitment' and all_checks.get('Industry & Sector Pages') != 'pass':
+        if self.mode == 'recruitment' and all_checks.get('Industry & Sector Pages') == 'fail':
             features.append({
                 'gap': 'Missing or insufficient sector/industry pages',
                 'feature': 'Sector Page Generator',
@@ -3458,7 +3483,7 @@ class CareerSiteGrader:
                 'stat': '60-80% of recruiter organic traffic from sector keywords',
             })
 
-        if all_checks.get('Server Response (TTFB)') != 'pass':
+        if all_checks.get('Server Response (TTFB)') == 'fail':
             features.append({
                 'gap': 'Slow server response times',
                 'feature': 'Global Edge CDN',

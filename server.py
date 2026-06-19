@@ -37,9 +37,15 @@ def _rate_ok(bucket: str, limit: int, window: int = 3600) -> bool:
         dq = _rl[key]
         while dq and dq[0] < now - window:
             dq.popleft()
+        if not dq and key in _rl and len(dq) == 0:
+            pass
         if len(dq) >= limit:
             return False
         dq.append(now)
+        # opportunistic cleanup so spoofed-IP keys don't accumulate forever
+        if len(_rl) > 5000:
+            for k in [k for k, d in list(_rl.items()) if not d or d[-1] < now - window]:
+                _rl.pop(k, None)
         return True
 
 
@@ -57,7 +63,7 @@ def _bypass_requested():
         return False
     tok = (request.args.get('token') or '').strip()
     expected = _admin_token()
-    return bool(expected) and tok == expected
+    return bool(expected) and secrets.compare_digest(tok, expected)
 
 
 def _pillar_scores(complete_event):
@@ -73,7 +79,7 @@ def _persist_and_enrich(event, fallback_url, mode, bypass=False):
         prior = db.history(domain, mode)
         db.save_grade(graded_url, domain, mode, event.get('overall_score', 0),
                       event.get('grade', ''), _pillar_scores(event))
-        bench = db.percentile(mode, event.get('overall_score', 0))
+        bench = db.percentile(mode, event.get('overall_score', 0), event.get('domain', ''))
         if bench:
             event['benchmark'] = bench
         if prior:
@@ -321,11 +327,20 @@ def api_cwv():
     cached = None if _bypass_requested() else db.get_cwv(url, mode)
     status = 'ready' if cached else 'pending'
     if not cached:
-        key = (url, mode)
-        with _cwv_lock:
-            if key not in _cwv_jobs:
-                _cwv_jobs.add(key)
-                threading.Thread(target=_measure_cwv_bg, args=(url, mode), daemon=True).start()
+        # Only spawn a (billable) PageSpeed job for URLs that were actually graded,
+        # rate-limited at spawn time — prevents anonymous PSI-cost abuse via ?url=.
+        if not db.url_graded(url, mode):
+            status = 'unavailable'
+        else:
+            key = (url, mode)
+            with _cwv_lock:
+                if key in _cwv_jobs:
+                    pass  # already measuring — keep polling
+                elif _rate_ok('cwv', limit=60):
+                    _cwv_jobs.add(key)
+                    threading.Thread(target=_measure_cwv_bg, args=(url, mode), daemon=True).start()
+                else:
+                    status = 'unavailable'
     resp = jsonify({'status': status, 'core_web_vitals': cached})
     resp.headers['Access-Control-Allow-Origin'] = '*'
     return resp
@@ -392,7 +407,7 @@ def cron_rescore():
     """Re-grade all active monitor subscriptions. Protect with ?token=CRON_TOKEN."""
     token = (request.args.get('token') or '').strip()
     expected = os.environ.get('CRON_TOKEN', '')
-    if not expected or token != expected:
+    if not expected or not secrets.compare_digest(token, expected):
         return jsonify({'error': 'unauthorized'}), 401
 
     monitors = db.active_monitors()
@@ -473,7 +488,7 @@ def cron_seed():
     take several minutes). Protect with ?token=CRON_TOKEN."""
     token = (request.args.get('token') or '').strip()
     expected = os.environ.get('CRON_TOKEN', '')
-    if not expected or token != expected:
+    if not expected or not secrets.compare_digest(token, expected):
         return jsonify({'error': 'unauthorized'}), 401
     mode = (request.args.get('mode') or 'recruitment').strip()
     threading.Thread(target=_seed_bg, args=(mode,), daemon=True).start()

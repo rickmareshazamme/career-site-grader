@@ -885,18 +885,43 @@ hr.section-divider {
 
 /* Print / PDF */
 @media print {
-  body { background: #fff !important; color: #111 !important; }
+  @page { margin: 14mm; }
+  * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+  body { background: #fff !important; color: #111 !important; font-size: 11px; }
+  /* Hide only the interactive chrome — keep ALL report content */
   #hero, #loading, .results-header, .header-actions, .lead-capture,
-  .pillars-preview, .site-footer, #competitor-input, .competitor-wrap { display: none !important; }
+  .pillars-preview, .site-footer, #competitor-input, .competitor-wrap,
+  .fresh-toggle, .rec-links { display: none !important; }
   #results { display: block !important; }
-  .container { max-width: 100% !important; }
-  .exec-card, .cwv-card, .pillar-card, .cmp-table-wrap, .check-help, .check-item, .rec-item,
-  .score-hero { background: #fff !important; color: #111 !important; border: 1px solid #ddd !important;
-    box-shadow: none !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-  .pillar-card { break-inside: avoid; }
-  .exec-verdict, .check-name, .pillar-name, .section-title, .score-number { color: #111 !important; }
-  .check-detail, .exec-opp-why, .pillar-summary-text { color: #444 !important; }
-  .pillar-card .pillar-checks, .pillar-card.expanded .pillar-checks { max-height: none !important; display: block !important; }
+  .container { max-width: 100% !important; padding: 0 !important; }
+
+  /* Light cards, full content, sensible page breaks */
+  .exec-card, .cwv-card, .pillar-card, .cmp-table-wrap, .check-help, .check-item,
+  .rec-item, .score-hero, .lead-card, .exec-opp, .rec-fix {
+    background: #fff !important; color: #111 !important; border: 1px solid #ddd !important;
+    box-shadow: none !important; }
+  .exec-summary, .comparison-section, .cwv-section, .recs-section,
+  .pillar-card, .rec-item { break-inside: avoid; }
+  .section-title { break-after: avoid; }
+
+  /* Force-expand every pillar's checks so the PDF shows the full breakdown */
+  .pillar-card .pillar-checks, .pillar-card.expanded .pillar-checks {
+    display: flex !important; max-height: none !important; }
+  .pillar-card .expand-hint { display: none !important; }
+
+  /* Readable text colours on white */
+  .exec-verdict, .check-name, .pillar-name, .section-title, .score-number,
+  .exec-opp-title, .rec-check, .cwv-perf-score, .cwv-metric-val, .res-domain { color: #111 !important; }
+  .check-detail, .exec-opp-why, .pillar-summary-text, .rec-detail, .rec-impact,
+  .bm-sub, .cwv-src, .check-help, .rec-fix, .cmp-rank { color: #333 !important; }
+  .check-help { background: #f4f4ff !important; }
+  .rec-fix { background: #f0fdf4 !important; }
+  .bm-pill, .rec-priority, .rec-pillar, .cwv-badge, .mode-badge { -webkit-print-color-adjust: exact; }
+  a { color: #111 !important; text-decoration: none; }
+  .cmp-table th, .cmp-table td { border-color: #ddd !important; }
+  /* Show the methodology + report URL footer on print */
+  #results::after { content: 'Shazamme Career Site Grader · webgrader.shazamme.com'; display: block;
+    margin-top: 16px; font-size: 9px; color: #888; }
 }
 
 /* ── Responsive ── */
@@ -1330,8 +1355,10 @@ function startGrading(e) {
 
   const checkHistory = [];
 
+  let streamDone = false;
   evtSource.onmessage = function(e) {
-    const data = JSON.parse(e.data);
+    let data;
+    try { data = JSON.parse(e.data); } catch (err) { return; }
 
     if (data.type === 'status') {
       setProgress(data.progress || 0);
@@ -1343,6 +1370,7 @@ function startGrading(e) {
     }
 
     if (data.type === 'error') {
+      streamDone = true;
       evtSource.close();
       addLoadingCheck('Error: ' + data.message, 'fail', checkHistory);
       setTimeout(() => {
@@ -1352,6 +1380,7 @@ function startGrading(e) {
     }
 
     if (data.type === 'complete') {
+      streamDone = true;
       evtSource.close();
       gradeData = data;
       setProgress(100);
@@ -1366,6 +1395,7 @@ function startGrading(e) {
   };
 
   evtSource.onerror = function() {
+    if (streamDone || evtSource.readyState !== EventSource.CLOSED) return;
     evtSource.close();
     alert('Connection error. Please try again.');
     gradeAnother();
@@ -1465,7 +1495,7 @@ function renderBenchmark(bench, hist, authority) {
   let html = '';
   if (bench && bench.ready) {
     const beats = bench.beats_pct;
-    html += `<span class="bm-pill">Beats <strong>${beats}%</strong> of ${bench.sample.toLocaleString()} graded sites</span>`;
+    html += `<span class="bm-pill">Beats <strong>${beats}%</strong> of ${(bench.sample||0).toLocaleString()} graded sites</span>`;
     html += `<span class="bm-sub">Category average: ${bench.average}</span>`;
   }
   if (authority && (authority.rank != null || authority.referring_domains != null)) {
@@ -1666,7 +1696,7 @@ function renderComparison(comp, pillars) {
   box.style.display = '';
   const t = comp.target;
   const rows = [t, ...comp.competitors];
-  const pillarKeys = Object.keys(pillars);
+  const pillarKeys = Object.keys(pillars || {});
   const pillarNames = pillarKeys.map(k => pillars[k].name);
   // Only show the Authority column if at least one row has authority data
   const hasAuthority = rows.some(r => r.authority && r.authority.referring_domains != null);
@@ -1701,6 +1731,7 @@ function renderPillars(pillars) {
   const grid = $('pillars-grid');
   grid.innerHTML = '';
 
+  pillars = pillars || {};
   const ORDER = selectedMode === 'general'
     ? ['seo','security','ux','content','technical','conversion']
     : ['seo','geo','cx','brand','technical','conversion'];
@@ -1719,7 +1750,7 @@ function renderPillars(pillars) {
 }
 
 function makePillarCard(p) {
-  const color = p.color || '#6366f1';
+  const color = safeColor(p.color);
   const gradeC = gradeColor(p.score);
 
   const card = document.createElement('div');
@@ -1783,7 +1814,7 @@ function renderRecs(recs) {
     const linksHtml = (r.links && r.links.length)
       ? `<div class="rec-links">${r.links.map(l => {
             const verify = /^verify/i.test(l.label);
-            return `<a href="${escHtml(l.url)}" target="_blank" rel="noopener" class="rec-link ${verify ? 'verify' : ''}">
+            return `<a href="${safeUrl(l.url)}" target="_blank" rel="noopener" class="rec-link ${verify ? 'verify' : ''}">
               <span class="material-icons-round">${verify ? 'fact_check' : 'open_in_new'}</span>${escHtml(l.label)}</a>`;
           }).join('')}</div>` : '';
     const valHtml = r.value ? `<div class="rec-evidence">Detected: ${escHtml(r.value)}</div>` : '';
@@ -1792,7 +1823,7 @@ function renderRecs(recs) {
       <div class="rec-priority ${r.priority}">${r.priority}</div>
       <div class="rec-body">
         <div class="rec-check">${escHtml(r.check)}${scoreBadge}</div>
-        <div class="rec-pillar" style="background:${r.pillar_color}18;color:${r.pillar_color}">${escHtml(r.pillar)}</div>
+        <div class="rec-pillar" style="background:${safeColor(r.pillar_color)}18;color:${safeColor(r.pillar_color)}">${escHtml(r.pillar)}</div>
         <div class="rec-detail">${escHtml(r.detail)}</div>
         ${valHtml}
         <div class="rec-impact">
@@ -1830,8 +1861,23 @@ function renderShazamme(items) {
 }
 
 function escHtml(s) {
-  if (!s) return '';
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  if (s == null) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/`/g,'&#96;');
+}
+
+// Allowlist URL protocols so a graded site can't plant a javascript: link.
+function safeUrl(u) {
+  if (!u) return '#';
+  try {
+    const p = new URL(u, window.location.origin).protocol;
+    if (p === 'http:' || p === 'https:' || p === 'mailto:') return escHtml(u);
+  } catch (e) {}
+  return '#';
+}
+// Validate a colour is a safe hex before injecting into style="".
+function safeColor(c) {
+  return (typeof c === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(c)) ? c : '#6366f1';
 }
 
 // ════════════════════════════════════════════
