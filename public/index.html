@@ -703,6 +703,28 @@ body {
   font-size: 12px; color: var(--text3);
 }
 .rec-impact .material-icons-round { font-size: 14px; color: var(--cyan); }
+.rec-evidence {
+  margin-top: 6px; font-size: 11px; color: var(--text3);
+  background: rgba(255,255,255,0.04); border: 1px solid var(--border);
+  border-radius: 4px; padding: 3px 8px; display: inline-block; max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.rec-fix {
+  display: flex; gap: 6px; margin-top: 10px; padding: 8px 10px;
+  background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.2);
+  border-radius: 6px; font-size: 12px; color: var(--text2); line-height: 1.5;
+}
+.rec-fix .material-icons-round { font-size: 15px; color: #34d399; flex-shrink: 0; margin-top: 1px; }
+.rec-fix strong { color: var(--text1); }
+.rec-links { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.rec-link {
+  display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px;
+  padding: 4px 10px; border-radius: 20px; text-decoration: none;
+  color: var(--text2); background: rgba(255,255,255,0.05); border: 1px solid var(--border);
+}
+.rec-link:hover { background: rgba(255,255,255,0.09); color: var(--text1); }
+.rec-link .material-icons-round { font-size: 13px; }
+.rec-link.verify { color: #93c5fd; background: rgba(59,130,246,0.1); border-color: rgba(59,130,246,0.25); }
 
 /* ── Shazamme Advantage ── */
 .shazamme-section {
@@ -1741,16 +1763,28 @@ function renderRecs(recs) {
   recs.forEach(r => {
     const el = document.createElement('div');
     el.className = `rec-item ${r.priority}`;
+    const fixHtml = r.how_to_fix
+      ? `<div class="rec-fix"><span class="material-icons-round">build</span><span><strong>How to fix:</strong> ${escHtml(r.how_to_fix)}</span></div>` : '';
+    const linksHtml = (r.links && r.links.length)
+      ? `<div class="rec-links">${r.links.map(l => {
+            const verify = /^verify/i.test(l.label);
+            return `<a href="${escHtml(l.url)}" target="_blank" rel="noopener" class="rec-link ${verify ? 'verify' : ''}">
+              <span class="material-icons-round">${verify ? 'fact_check' : 'open_in_new'}</span>${escHtml(l.label)}</a>`;
+          }).join('')}</div>` : '';
+    const valHtml = r.value ? `<div class="rec-evidence">Detected: ${escHtml(r.value)}</div>` : '';
     el.innerHTML = `
       <div class="rec-priority ${r.priority}">${r.priority}</div>
       <div class="rec-body">
         <div class="rec-check">${escHtml(r.check)}</div>
         <div class="rec-pillar" style="background:${r.pillar_color}18;color:${r.pillar_color}">${escHtml(r.pillar)}</div>
         <div class="rec-detail">${escHtml(r.detail)}</div>
+        ${valHtml}
         <div class="rec-impact">
           <span class="material-icons-round">lightbulb</span>
           ${escHtml(r.impact)}
         </div>
+        ${fixHtml}
+        ${linksHtml}
       </div>
     `;
     list.appendChild(el);

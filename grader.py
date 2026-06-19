@@ -2838,6 +2838,77 @@ class CareerSiteGrader:
         'Heading Structure': 'Use a logical H2/H3 outline so readers and crawlers can follow the content. Add descriptive subheadings instead of long unbroken text.',
     }
 
+    # Reference / example / validator links per check. The "verify" links let
+    # anyone independently confirm a finding (and rule out false positives); the
+    # "example/docs" links show exactly what good looks like.
+    EXAMPLES = {
+        'Title Tag': [('Google: title links', 'https://developers.google.com/search/docs/appearance/title-link')],
+        'Meta Description': [('Google: snippets', 'https://developers.google.com/search/docs/appearance/snippet')],
+        'H1 Heading': [('MDN: heading elements', 'https://developer.mozilla.org/en-US/docs/Web/HTML/Element/Heading_Elements')],
+        'Schema / Structured Data': [
+            ('Verify: Rich Results Test', 'https://search.google.com/test/rich-results'),
+            ('Example: Organization', 'https://schema.org/Organization')],
+        'Structured Data Validity': [
+            ('Verify: Rich Results Test', 'https://search.google.com/test/rich-results'),
+            ('Google: JobPosting required fields', 'https://developers.google.com/search/docs/appearance/structured-data/job-posting')],
+        'Open Graph / Social Tags': [
+            ('Verify: LinkedIn Post Inspector', 'https://www.linkedin.com/post-inspector/'),
+            ('Spec: Open Graph protocol', 'https://ogp.me/')],
+        'Canonical URL': [('Google: canonicalization', 'https://developers.google.com/search/docs/crawling-indexing/canonicalization')],
+        'Indexability': [('Google: robots meta tag', 'https://developers.google.com/search/docs/crawling-indexing/robots-meta-tag')],
+        'Heading Hierarchy': [('WebAIM: headings', 'https://webaim.org/techniques/semanticstructure/')],
+        'Heading Structure': [('WebAIM: headings', 'https://webaim.org/techniques/semanticstructure/')],
+        'Industry & Sector Pages': [('Example: sector landing pages', 'https://www.hays.co.uk/recruitment')],
+        'Sitemap.xml': [('Spec: sitemaps.org', 'https://www.sitemaps.org/protocol.html')],
+        'AI Crawler Access': [
+            ('Verify: open /robots.txt', '/robots.txt'),
+            ('Reference: AI bot user-agents', 'https://platform.openai.com/docs/bots')],
+        'llms.txt File': [
+            ('Spec + examples: llmstxt.org', 'https://llmstxt.org/'),
+            ('Example file', 'https://llmstxt.org/llms.txt')],
+        'llm-info File': [('Background: AI content guidance', 'https://llmstxt.org/')],
+        'FAQ & Q&A Schema': [
+            ('Verify: Rich Results Test', 'https://search.google.com/test/rich-results'),
+            ('Google: FAQ structured data', 'https://developers.google.com/search/docs/appearance/structured-data/faqpage')],
+        'FAQ Content': [('Google: FAQ structured data', 'https://developers.google.com/search/docs/appearance/structured-data/faqpage')],
+        'Content Structure': [('web.dev: structure content', 'https://web.dev/learn/html/headings-and-sections')],
+        'Entity & Authority': [
+            ('Google: E-E-A-T', 'https://developers.google.com/search/docs/fundamentals/creating-helpful-content'),
+            ('schema.org: sameAs', 'https://schema.org/sameAs')],
+        'Content Depth': [('Google: helpful content', 'https://developers.google.com/search/docs/fundamentals/creating-helpful-content')],
+        'AEO / Answer-Engine Readiness': [('Google: AI features & your site', 'https://developers.google.com/search/docs/appearance/ai-features')],
+        'Crawlable Content (JS-render)': [
+            ('Verify: URL Inspection (rendered HTML)', 'https://support.google.com/webmasters/answer/9012289'),
+            ('Google: JavaScript SEO basics', 'https://developers.google.com/search/docs/crawling-indexing/javascript/javascript-seo-basics')],
+        'Core Web Vitals': [
+            ('Verify: PageSpeed Insights', 'https://pagespeed.web.dev/'),
+            ('web.dev: Core Web Vitals', 'https://web.dev/articles/vitals')],
+        'Lighthouse Performance': [('Verify: PageSpeed Insights', 'https://pagespeed.web.dev/')],
+        'Mobile Readiness': [('Verify: Lighthouse mobile', 'https://pagespeed.web.dev/'),
+                             ('Google: responsive design', 'https://developers.google.com/search/docs/crawling-indexing/mobile/responsive-design')],
+        'Accessibility (WCAG)': [
+            ('Verify: WAVE checker', 'https://wave.webaim.org/'),
+            ('WCAG quick reference', 'https://www.w3.org/WAI/WCAG21/quickref/')],
+        'Semantic HTML & ARIA': [
+            ('Verify: WAVE checker', 'https://wave.webaim.org/'),
+            ('MDN: ARIA landmarks', 'https://developer.mozilla.org/en-US/docs/Web/Accessibility/ARIA/Roles/Landmark_roles')],
+        'HTTPS / SSL': [('Verify: SSL Labs', 'https://www.ssllabs.com/ssltest/')],
+        'HTTPS Trust Signal': [('Verify: SSL Labs', 'https://www.ssllabs.com/ssltest/')],
+        'Content Compression': [('Verify: compression test', 'https://www.giftofspeed.com/gzip-test/')],
+        'Render-Blocking Scripts': [('Verify: PageSpeed opportunities', 'https://pagespeed.web.dev/')],
+        'Strict-Transport-Security': [('Verify: securityheaders.com', 'https://securityheaders.com/')],
+        'Content-Security-Policy': [('Verify: securityheaders.com', 'https://securityheaders.com/')],
+        'X-Content-Type-Options': [('Verify: securityheaders.com', 'https://securityheaders.com/')],
+        'X-Frame-Options': [('Verify: securityheaders.com', 'https://securityheaders.com/')],
+        'Referrer-Policy': [('Verify: securityheaders.com', 'https://securityheaders.com/')],
+        'Permissions-Policy': [('Verify: securityheaders.com', 'https://securityheaders.com/')],
+        'Image Alt Text': [('WebAIM: alternative text', 'https://webaim.org/techniques/alttext/')],
+        'Image Optimization': [('web.dev: optimize images', 'https://web.dev/articles/fast#optimize-your-images')],
+        'EVP & Pay Transparency': [('Example: strong careers EVP', 'https://www.lifeatspotify.com/')],
+        'Video Content': [('Google: video best practices', 'https://developers.google.com/search/docs/appearance/video')],
+        'DE&I Commitment': [('Example: DE&I page', 'https://www.microsoft.com/en-us/diversity')],
+    }
+
     def _attach_guidance(self, pillar_result: Dict):
         for check in pillar_result.get('checks', []):
             if check.get('status') in ('warn', 'fail') and check['name'] in self.GUIDANCE:
@@ -2975,13 +3046,21 @@ class CareerSiteGrader:
         for pillar_data in pillars.values():
             for check in pillar_data.get('checks', []):
                 if check['status'] in ('fail', 'warn'):
+                    name = check['name']
+                    examples = self.EXAMPLES.get(name, [])
+                    # Resolve relative verify links (e.g. /robots.txt) to this site
+                    links = [{'label': lbl, 'url': (urljoin(self.base_url, u) if u.startswith('/') else u)}
+                             for lbl, u in examples]
                     recs.append({
                         'priority': 'critical' if check['status'] == 'fail' else 'high',
                         'pillar': pillar_data['name'],
                         'pillar_color': pillar_data.get('color', '#6366f1'),
-                        'check': check['name'],
+                        'check': name,
                         'detail': check['detail'],
-                        'impact': IMPACT.get(check['name'], default_impact),
+                        'impact': IMPACT.get(name, default_impact),
+                        'how_to_fix': self.GUIDANCE.get(name),
+                        'value': check.get('value'),
+                        'links': links,
                     })
         recs.sort(key=lambda x: 0 if x['priority'] == 'critical' else 1)
         return recs[:15]
