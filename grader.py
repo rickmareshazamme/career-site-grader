@@ -655,7 +655,9 @@ class CareerSiteGrader:
 
         for raw in (txt or '').lower().splitlines():
             line = raw.strip()
-            if not line or line.startswith('#'):
+            if line.startswith('#'):
+                continue  # comments don't terminate a group (RFC 9309)
+            if not line:
                 if group_agents:
                     flush()
                 last_directive = False
