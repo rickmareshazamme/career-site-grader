@@ -688,6 +688,9 @@ body {
 }
 .rec-priority.critical { background: rgba(244,63,94,0.15); color: var(--rose); }
 .rec-priority.high     { background: rgba(245,158,11,0.15); color: var(--amber); }
+.rec-priority.medium   { background: rgba(99,102,241,0.15); color: #818cf8; }
+.rec-priority.low      { background: rgba(148,163,184,0.15); color: #94a3b8; }
+.rec-score { font-size: 11px; font-weight: 700; color: var(--text3); margin-left: 8px; }
 
 .rec-body { flex: 1; min-width: 0; }
 .rec-check { font-weight: 700; font-size: 14px; margin-bottom: 2px; }
@@ -1784,10 +1787,11 @@ function renderRecs(recs) {
               <span class="material-icons-round">${verify ? 'fact_check' : 'open_in_new'}</span>${escHtml(l.label)}</a>`;
           }).join('')}</div>` : '';
     const valHtml = r.value ? `<div class="rec-evidence">Detected: ${escHtml(r.value)}</div>` : '';
+    const scoreBadge = (r.score != null && r.max) ? `<span class="rec-score">${r.score}/${r.max}</span>` : '';
     el.innerHTML = `
       <div class="rec-priority ${r.priority}">${r.priority}</div>
       <div class="rec-body">
-        <div class="rec-check">${escHtml(r.check)}</div>
+        <div class="rec-check">${escHtml(r.check)}${scoreBadge}</div>
         <div class="rec-pillar" style="background:${r.pillar_color}18;color:${r.pillar_color}">${escHtml(r.pillar)}</div>
         <div class="rec-detail">${escHtml(r.detail)}</div>
         ${valHtml}

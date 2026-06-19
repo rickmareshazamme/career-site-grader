@@ -617,6 +617,52 @@ class CareerSiteGrader:
                 types.append(str(t))
         return types
 
+    def _parse_robots_blocks(self, txt: str) -> Dict[str, bool]:
+        """Parse robots.txt into {user-agent token: fully-blocked?}, honouring
+        grouped user-agents and Allow overrides (RFC 9309 longest-match approx).
+        An agent is 'fully blocked' only if its group has Disallow: / (or /*) and
+        no Allow directive re-opens a path."""
+        result: Dict[str, bool] = {}
+        group_agents: List[str] = []
+        disallow_root = False
+        has_allow = False
+        last_directive = False
+
+        def flush():
+            nonlocal group_agents, disallow_root, has_allow
+            blocked = disallow_root and not has_allow
+            for a in group_agents:
+                result[a] = (result[a] and blocked) if a in result else blocked
+            group_agents = []
+            disallow_root = False
+            has_allow = False
+
+        for raw in (txt or '').lower().splitlines():
+            line = raw.strip()
+            if not line or line.startswith('#'):
+                if group_agents:
+                    flush()
+                last_directive = False
+                continue
+            if line.startswith('user-agent:'):
+                if last_directive and group_agents:
+                    flush()
+                group_agents.append(line.split(':', 1)[1].strip())
+                last_directive = False
+            elif line.startswith('disallow:'):
+                if line.split(':', 1)[1].strip() in ('/', '/*'):
+                    disallow_root = True
+                last_directive = True
+            elif line.startswith('allow:'):
+                if line.split(':', 1)[1].strip():
+                    has_allow = True
+                last_directive = True
+            else:
+                last_directive = True
+        if group_agents:
+            flush()
+        return result
+
     def _soup_schema_types(self, soup) -> List[str]:
         """Schema @types present on a SINGLE page (for per-page coverage)."""
         types: List[str] = []
@@ -643,6 +689,22 @@ class CareerSiteGrader:
     JOB_PAGE_URL = re.compile(
         r'/job-?detail|jobid=|/job/\d|/jobs?/[^/?]+/[^/?]+|/job-?results?/[^/?]+/[^/?]+|'
         r'/jobseekers/job-results/[^/?]+/[^/?]+', re.I)
+
+    def _coverage_pages(self) -> List:
+        """[(label, soup)] for every scanned page — homepage + extras."""
+        pages = [('homepage', self.soup)] if self.soup else []
+        pages += [(k, v) for k, v in self.extra_soups.items() if v is not None]
+        return pages
+
+    def _short_path(self, label: str) -> str:
+        if label == 'homepage':
+            return '/'
+        if label.startswith('http'):
+            try:
+                return urlparse(label).path or label
+            except Exception:
+                return label
+        return label
 
     def _get_coverage(self) -> Dict:
         """Site-wide schema coverage across every scanned page. FAQ/content metrics
@@ -851,15 +913,31 @@ class CareerSiteGrader:
         h1_tags = soup.find_all('h1')
         h1_count = len(h1_tags)
         h1_text = h1_tags[0].get_text().strip() if h1_tags else ''
-        if h1_count == 1:
-            pts, note = 10, f'Single H1: "{h1_text[:70]}"'
-        elif h1_count > 1:
-            pts, note = 5, f'{h1_count} H1 tags found — only one H1 allowed per page'
-        else:
-            pts, note = 0, 'No H1 tag — critical for SEO and screen readers'
+        # H1 coverage across ALL scanned pages — report the facts and LIST the
+        # pages actually missing one. (Multiple H1s are valid in HTML5/Google, so
+        # they're not penalised; only a missing H1 is a real problem.)
+        pages = self._coverage_pages()
+        no_h1, multi_h1 = [], []
+        for label, s in pages:
+            n = len(s.find_all('h1'))
+            if n == 0:
+                no_h1.append(self._short_path(label))
+            elif n > 1:
+                multi_h1.append(self._short_path(label))
+        total = len(pages) or 1
+        with_h1 = total - len(no_h1)
+        pts = round(10 * with_h1 / total)
+        h1_notes = [f'H1 present on {with_h1} of {total} pages scanned']
+        if no_h1:
+            shown = ', '.join(no_h1[:6]) + (f' +{len(no_h1) - 6} more' if len(no_h1) > 6 else '')
+            h1_notes.append(f'missing H1: {shown}')
+        if multi_h1:
+            h1_notes.append(f'{len(multi_h1)} page(s) with multiple H1s (valid in HTML5)')
+        if not no_h1:
+            h1_notes[0] += ' ✓'
         checks.append({'name': 'H1 Heading', 'weight': 10, 'score': pts, 'max': 10,
-                        'status': self._pts_status(pts, 10), 'detail': note,
-                        'value': h1_text[:80] if h1_text else None})
+                        'status': self._pts_status(pts, 10), 'detail': ' | '.join(h1_notes),
+                        'value': (f'Homepage H1: "{h1_text[:70]}"' if h1_text else None)})
         score += pts; max_score += 10
 
         # --- Schema Markup --- (mode-specific)
@@ -1194,64 +1272,58 @@ class CareerSiteGrader:
         max_score = 0
 
         # --- AI Crawler Access (full 2026 bot matrix) ---
-        # group -> the user-agent tokens that represent it in robots.txt
-        AI_BOTS = {
-            'ChatGPT (GPTBot)':        ['gptbot'],
-            'ChatGPT Search':          ['oai-searchbot', 'chatgpt-user'],
-            'Claude (ClaudeBot)':      ['claudebot', 'anthropic-ai', 'claude-web', 'claude-searchbot'],
-            'Google AI (Gemini/AIO)':  ['google-extended'],
-            'Perplexity':              ['perplexitybot', 'perplexity-user'],
-            'Apple Intelligence':      ['applebot-extended'],
-            'Amazon (Alexa/Rufus)':    ['amazonbot'],
-            'Meta AI':                 ['meta-externalagent', 'facebookbot'],
-            'Common Crawl (CCBot)':    ['ccbot'],
-            'ByteDance (Bytespider)':  ['bytespider'],
-            'Cohere':                  ['cohere-ai'],
+        # Bots that drive LIVE citation/visibility in answer engines (blocking
+        # these = real lost AI visibility) vs training-data opt-outs (blocking is
+        # a legitimate privacy choice with NO effect on being cited live).
+        RETRIEVAL_BOTS = {
+            'ChatGPT Search': ['oai-searchbot', 'chatgpt-user'],
+            'Claude':         ['claudebot', 'claude-searchbot', 'claude-web', 'anthropic-ai'],
+            'Perplexity':     ['perplexitybot', 'perplexity-user'],
+            'Amazon (Rufus)': ['amazonbot'],
+            'Meta AI':        ['meta-externalagent'],
+            'ByteDance':      ['bytespider'],
         }
-        blocked_groups = []
-        if self.robots_txt:
-            # Map each user-agent token to whether it is fully disallowed
-            disallow_all_agents = set()
-            current_agents: List[str] = []
-            for line in self.robots_txt.lower().splitlines():
-                line = line.strip()
-                if line.startswith('user-agent:'):
-                    current_agents.append(line.split(':', 1)[1].strip())
-                elif line.startswith('disallow:'):
-                    val = line.split(':', 1)[1].strip()
-                    if val in ('/', '/*'):
-                        for a in current_agents:
-                            disallow_all_agents.add(a)
-                    current_agents = []  # reset group after directives
-                elif line.startswith('allow:'):
-                    current_agents = current_agents
-                elif line == '':
-                    current_agents = []
-            for group, tokens in AI_BOTS.items():
-                if any(tok in disallow_all_agents for tok in tokens):
-                    blocked_groups.append(group)
+        TRAINING_BOTS = {
+            'OpenAI GPTBot (training)': ['gptbot'],
+            'Google Gemini (training)': ['google-extended'],
+            'Apple (training)':         ['applebot-extended'],
+            'Common Crawl':             ['ccbot'],
+            'Cohere (training)':        ['cohere-ai'],
+        }
+        blocked_status = self._parse_robots_blocks(self.robots_txt) if self.robots_txt else {}
+
+        def _bot_blocked(tokens):
+            named = [blocked_status[t] for t in tokens if t in blocked_status]
+            if named:
+                return all(named)            # a named group overrides the * default
+            return blocked_status.get('*', False)
+
+        ret_blocked = [g for g, toks in RETRIEVAL_BOTS.items() if _bot_blocked(toks)]
+        train_blocked = [g for g, toks in TRAINING_BOTS.items() if _bot_blocked(toks)]
 
         ai_max = 20
         ai_notes = []
         if self.robots_txt:
             ai_notes.append('robots.txt found ✓')
-            sitemap_directive = 'sitemap:' in self.robots_txt.lower()
-            if sitemap_directive:
+            if 'sitemap:' in self.robots_txt.lower():
                 ai_notes.append('Sitemap directive ✓')
-            total = len(AI_BOTS)
-            allowed = total - len(blocked_groups)
-            ai_pts = round(ai_max * (allowed / total))
-            if blocked_groups:
-                ai_notes.append(f'BLOCKED for: {", ".join(blocked_groups[:5])}')
+            ret_total = len(RETRIEVAL_BOTS)
+            train_total = len(TRAINING_BOTS)
+            # 16 of 20 points ride on answer-engine (citation) bots; 4 on training.
+            ai_pts = round(16 * (ret_total - len(ret_blocked)) / ret_total
+                           + 4 * (train_total - len(train_blocked)) / train_total)
+            if ret_blocked:
+                ai_notes.append(f'BLOCKED from answer engines: {", ".join(ret_blocked)} — lost AI citations')
             else:
-                ai_notes.append(f'All {total} major AI crawlers allowed ✓')
+                ai_notes.append(f'All {ret_total} answer-engine crawlers allowed ✓')
+            if train_blocked:
+                ai_notes.append(f'Training opt-out (fine, no citation impact): {", ".join(train_blocked[:3])}')
         else:
-            # No robots.txt = nothing is blocked (default-allow) but no signalling
-            ai_pts = round(ai_max * 0.8)
-            ai_notes.append('No robots.txt — AI crawlers default-allowed but you give them no guidance')
+            ai_pts = ai_max  # no robots.txt = every crawler allowed — the ideal default
+            ai_notes.append('No robots.txt — all crawlers allowed (optionally add a Sitemap: directive)')
         checks.append({'name': 'AI Crawler Access', 'weight': ai_max, 'score': ai_pts, 'max': ai_max,
                         'status': self._pts_status(ai_pts, ai_max), 'detail': ' | '.join(ai_notes),
-                        'value': f'{len(AI_BOTS) - len(blocked_groups)}/{len(AI_BOTS)} AI crawlers allowed'})
+                        'value': f'{len(RETRIEVAL_BOTS) - len(ret_blocked)}/{len(RETRIEVAL_BOTS)} answer-engine crawlers allowed'})
         score += ai_pts; max_score += ai_max
 
         # --- llms.txt ---
@@ -1263,19 +1335,14 @@ class CareerSiteGrader:
                         'status': self._pts_status(pts, 10), 'detail': note})
         score += pts; max_score += 10
 
-        # --- llm-info ---
+        # NOTE: 'llm-info' is NOT a real or adopted standard (no spec, no AI system
+        # reads it), so it is intentionally NOT scored — penalising every site for
+        # lacking a fictional file was a false positive. If one happens to exist we
+        # surface it as an informational bonus only.
         if self.llm_info_url:
-            pts  = 10
-            note = f'llm-info found at {self.llm_info_url} — AI models can read structured brand/service data ✓'
-        else:
-            pts  = 0
-            note = ('No llm-info file found (checked /.well-known/llm-info, /llm-info, '
-                    '/llm-info.json, /llm-info.txt) — add one so AI models accurately '
-                    'represent your services, sectors, and locations')
-        checks.append({'name': 'llm-info File', 'weight': 10, 'score': pts, 'max': 10,
-                        'status': self._pts_status(pts, 10), 'detail': note,
-                        'value': self.llm_info_url or None})
-        score += pts; max_score += 10
+            checks.append({'name': 'llm-info File', 'weight': 0, 'score': 0, 'max': 0,
+                           'status': 'pass', 'detail': f'llm-info present at {self.llm_info_url} (informational)',
+                           'value': self.llm_info_url})
 
         # --- FAQ Schema (checked across every scanned page, not just the homepage) ---
         has_faq_schema = ('FAQPage' in schema_types) or ('QAPage' in schema_types)
@@ -1645,20 +1712,8 @@ class CareerSiteGrader:
             score += pts; max_score += 8
 
             # --- Page Speed (TTFB) (10pts) ---
-            rt = self.response_time
-            if rt < 0.5:
-                pts, note = 10, f'Excellent TTFB: {rt:.2f}s'
-            elif rt < 1.0:
-                pts, note = 8, f'Good TTFB: {rt:.2f}s'
-            elif rt < 2.0:
-                pts, note = 5, f'Slow TTFB: {rt:.2f}s — investigate server performance'
-            elif rt < 4.0:
-                pts, note = 2, f'Very slow: {rt:.2f}s — 53% of users leave after 3s'
-            else:
-                pts, note = 0, f'Critical: {rt:.2f}s TTFB — site is painfully slow'
-            checks.append({'name': 'Page Speed (TTFB)', 'weight': 10, 'score': pts, 'max': 10,
-                            'status': self._pts_status(pts, 10), 'detail': note})
-            score += pts; max_score += 10
+            ttfb = self._ttfb_check(10, name='Page Speed (TTFB)')
+            checks.append(ttfb); score += ttfb['score']; max_score += ttfb['max']
 
             # --- Form Usability (10pts) ---
             fu = self._form_usability(soup, 10)
@@ -1754,20 +1809,8 @@ class CareerSiteGrader:
             score += pts; max_score += 10
 
             # --- Page Speed (TTFB) ---
-            rt = self.response_time
-            if rt < 0.5:
-                pts, note = 10, f'Excellent TTFB: {rt:.2f}s'
-            elif rt < 1.0:
-                pts, note = 8, f'Good TTFB: {rt:.2f}s'
-            elif rt < 2.0:
-                pts, note = 5, f'Slow TTFB: {rt:.2f}s — investigate server performance'
-            elif rt < 4.0:
-                pts, note = 2, f'Very slow: {rt:.2f}s — 53% of users leave after 3s'
-            else:
-                pts, note = 0, f'Critical: {rt:.2f}s TTFB — site is painfully slow'
-            checks.append({'name': 'Page Speed (TTFB)', 'weight': 10, 'score': pts, 'max': 10,
-                            'status': self._pts_status(pts, 10), 'detail': note})
-            score += pts; max_score += 10
+            ttfb = self._ttfb_check(10, name='Page Speed (TTFB)')
+            checks.append(ttfb); score += ttfb['score']; max_score += ttfb['max']
 
             # --- Form Usability ---
             fu = self._form_usability(soup, 10)
@@ -1875,6 +1918,22 @@ class CareerSiteGrader:
         pts = min(pts, mx)
         return {'name': 'Form Usability', 'weight': mx, 'score': pts, 'max': mx,
                 'status': self._pts_status(pts, mx), 'detail': ' | '.join(notes)}
+
+    def _ttfb_check(self, mx: int, name: str = 'Server Response (TTFB)') -> Dict:
+        """Response time of a single cold server-side fetch (includes our network
+        latency to the origin) — graded on web.dev TTFB bands, not asserting a
+        server fault. CrUX field TTFB, when available, is the authoritative source."""
+        rt = self.response_time
+        if rt < 0.8:
+            pts, note = mx, f'Fast first byte: {rt:.2f}s'
+        elif rt < 1.8:
+            pts, note = round(mx * 0.75), f'Reasonable first byte: {rt:.2f}s (single cold fetch incl. network)'
+        elif rt < 3.0:
+            pts, note = round(mx * 0.45), f'Slow first byte: {rt:.2f}s — check caching/CDN (or cold start)'
+        else:
+            pts, note = round(mx * 0.2), f'Very slow first byte: {rt:.2f}s — investigate caching/CDN/host'
+        return {'name': name, 'weight': mx, 'score': pts, 'max': mx,
+                'status': self._pts_status(pts, mx), 'detail': note, 'value': f'{rt:.2f}s'}
 
     def _detect_ats(self) -> Dict:
         """Detect ATS platforms from HTML content and iframe sources."""
@@ -2349,14 +2408,9 @@ class CareerSiteGrader:
         score += nav_pts; max_score += 12
 
         # --- TTFB (15pts) ---
-        rt = self.response_time
-        if rt < 0.5:   pts, note = 15, f'Excellent TTFB: {rt:.2f}s'
-        elif rt < 1.0:  pts, note = 12, f'Good TTFB: {rt:.2f}s'
-        elif rt < 2.0:  pts, note = 8, f'Average: {rt:.2f}s'
-        elif rt < 4.0:  pts, note = 4, f'Slow: {rt:.2f}s'
-        else:           pts, note = 0, f'Critical: {rt:.2f}s'
-        checks.append({'name': 'Page Speed (TTFB)', 'weight': 15, 'score': pts, 'max': 15,
-                        'status': self._pts_status(pts, 15), 'detail': note})
+        ttfb = self._ttfb_check(15, name='Page Speed (TTFB)')
+        pts = ttfb['score']
+        checks.append(ttfb)
         score += pts; max_score += 15
 
         # --- Font Loading (10pts) ---
@@ -2634,15 +2688,8 @@ class CareerSiteGrader:
 
         # --- Server Response Time ---
         ttfb_max = 20 if self.mode == 'general' else 25
-        rt = self.response_time
-        if rt < 0.5:   pts, note = ttfb_max, f'Excellent TTFB: {rt:.2f}s — top 10%'
-        elif rt < 1.0:  pts, note = round(ttfb_max * 0.8), f'Good TTFB: {rt:.2f}s'
-        elif rt < 2.0:  pts, note = round(ttfb_max * 0.56), f'Average: {rt:.2f}s — target <1s'
-        elif rt < 4.0:  pts, note = round(ttfb_max * 0.28), f'Slow: {rt:.2f}s'
-        else:           pts, note = round(ttfb_max * 0.08), f'Critical: {rt:.2f}s'
-        checks.append({'name': 'Server Response (TTFB)', 'weight': ttfb_max, 'score': pts, 'max': ttfb_max,
-                        'status': self._pts_status(pts, ttfb_max), 'detail': note})
-        score += pts; max_score += ttfb_max
+        ttfb = self._ttfb_check(ttfb_max, name='Server Response (TTFB)')
+        checks.append(ttfb); score += ttfb['score']; max_score += ttfb_max
 
         # --- Compression ---
         encoding = self.headers.get('content-encoding', '')
@@ -2804,36 +2851,57 @@ class CareerSiteGrader:
                         'status': self._pts_status(pts, 25), 'detail': note})
         score += pts; max_score += 25
 
-        # --- Lead Capture ---
-        email_inputs = soup.find_all('input', type=re.compile(r'email', re.I))
+        # --- Lead Capture / Job Alerts (scanned across ALL pages + JS widgets) ---
+        combined_text = self._combined_text()
+        combined_html = self._combined_html()
+        email_inputs = []
+        for s in self._all_soups():
+            email_inputs += s.find_all('input', type=re.compile(r'email', re.I))
+        # Email-capture widgets are usually JS-injected (Mailchimp/HubSpot/etc.)
+        widget_capture = bool(re.search(
+            r'mailchimp|list-manage|hsforms|hubspot|klaviyo|constantcontact|mailerlite|'
+            r'campaign-?monitor|sendinblue|brevo|getresponse', combined_html))
         if self.mode == 'general':
-            alert_sig = bool(re.search(r'subscribe|newsletter|notify|get notified|mailing list', page_text))
+            alert_sig = bool(re.search(r'subscribe|newsletter|notify|get notified|mailing list', combined_text))
             lead_label = 'Lead Capture / Newsletter'
         else:
             alert_sig = bool(re.search(
-                r'job alert|email alert|notify me|get notified|job match|saved search|subscribe', page_text))
+                r'job alert|email alert|notify me|get notified|job match|saved search|create (an )?alert|'
+                r'subscribe', combined_text))
             lead_label = 'Job Alerts & Lead Capture'
-        # Either signal alone is a real (partial) lead-capture feature — score so a
-        # detected feature lands at 'warn', never a ✓-on-FAIL contradiction.
+        # A clearly-detected feature must PASS — never flag "✓ detected" as a fix.
+        has_capture = bool(email_inputs) or widget_capture
         alert_pts = 0; alert_notes = []
-        if email_inputs: alert_pts += 10; alert_notes.append(f'{len(email_inputs)} email capture(s) ✓')
-        if alert_sig: alert_pts += 10; alert_notes.append('Subscription/alert detected ✓')
+        if alert_sig and has_capture:
+            alert_pts = 20
+            alert_notes.append('Job alert / email signup detected ✓' if self.mode != 'general'
+                               else 'Newsletter / lead capture detected ✓')
+        elif alert_sig or has_capture:
+            alert_pts = 16  # a real signal present → passes; not a "fix this"
+            if email_inputs:
+                alert_notes.append(f'{len(email_inputs)} email capture field(s) ✓')
+            if widget_capture:
+                alert_notes.append('Email-capture widget detected ✓')
+            if alert_sig:
+                alert_notes.append('Alert/subscribe wording detected ✓')
+            alert_notes.append('confirm it offers an ongoing job alert, not just a contact form')
         else:
             if self.mode == 'general':
-                alert_notes.append('No newsletter/subscribe — missing lead capture opportunity')
+                alert_notes.append('No newsletter/subscribe found across scanned pages')
             else:
-                alert_notes.append('No job alert feature — critical for re-engaging passive candidates')
-        alert_pts = min(alert_pts, 20)
+                alert_notes.append('No job alert / email signup found across scanned pages — add one to re-engage passive candidates')
         checks.append({'name': lead_label, 'weight': 20, 'score': alert_pts, 'max': 20,
                         'status': self._pts_status(alert_pts, 20), 'detail': ' | '.join(alert_notes)})
         score += alert_pts; max_score += 20
 
-        # --- Live Chat / Chatbot ---
+        # --- Live Chat / Chatbot (scan all pages + JS-injected widgets) ---
+        chat_haystack = self._combined_html() + ' ' + (self.rendered_html or '').lower()
         chat_sig = re.search(
-            r'intercom|drift|crisp|tawk|zendesk|livechat|tidio|freshchat|hubspot|'
-            r'chatbot|live.?chat|chat.?widget|widget.?chat|genesys|qualified', html_lower)
+            r'intercom|drift\.com|crisp\.chat|tawk\.to|zendesk|livechat|tidio|freshchat|'
+            r'liveperson|olark|smartsupp|chatbot|live.?chat|chat.?widget|widget.?chat|'
+            r'genesys|qualified|hubspot.*(conversations|messages)', chat_haystack)
         chat_pts = 20 if chat_sig else 0
-        chat_note = 'Live chat / chatbot detected ✓' if chat_sig else 'No chat detected — missed engagement opportunity'
+        chat_note = 'Live chat / chatbot detected ✓' if chat_sig else 'No chat/chatbot found across scanned pages'
         checks.append({'name': 'Live Chat & Chatbot', 'weight': 20, 'score': chat_pts, 'max': 20,
                         'status': self._pts_status(chat_pts, 20), 'detail': chat_note})
         score += chat_pts; max_score += 20
@@ -3209,8 +3277,24 @@ class CareerSiteGrader:
                     # Resolve relative verify links (e.g. /robots.txt) to this site
                     links = [{'label': lbl, 'url': (urljoin(self.base_url, u) if u.startswith('/') else u)}
                              for lbl, u in examples]
+                    # Proportionate severity, on the FACTS: a near-complete check
+                    # is never 'critical'. Critical is reserved for a genuinely
+                    # absent, high-weight signal (score 0 on a >=12pt check).
+                    mx = check.get('max') or 1
+                    ratio = check.get('score', 0) / mx
+                    weight = check.get('max', 0)
+                    if ratio <= 0.0 and weight >= 12:
+                        priority = 'critical'
+                    elif ratio < 0.45:
+                        priority = 'high'
+                    elif ratio < 0.8:
+                        priority = 'medium'
+                    else:
+                        priority = 'low'
                     recs.append({
-                        'priority': 'critical' if check['status'] == 'fail' else 'high',
+                        'priority': priority,
+                        'score': check.get('score', 0),
+                        'max': mx,
                         'pillar': pillar_data['name'],
                         'pillar_color': pillar_data.get('color', '#6366f1'),
                         'check': name,
@@ -3220,7 +3304,8 @@ class CareerSiteGrader:
                         'value': check.get('value'),
                         'links': links,
                     })
-        recs.sort(key=lambda x: 0 if x['priority'] == 'critical' else 1)
+        order = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
+        recs.sort(key=lambda x: order.get(x['priority'], 9))
         return recs[:15]
 
     def _generate_shazamme_advantage(self, pillars: Dict) -> List[Dict]:
