@@ -627,16 +627,39 @@ class CareerSiteGrader:
                 ceiling = 25 if self.light else self.CRAWL_CEILING
                 rest_urls = [u for u in sitemap_urls if u not in pri_set][:ceiling]
 
-                tasks = ([crawl_one(u, j, True) for u, j in priority_urls]
-                         + [crawl_one(u, False, False) for u in rest_urls])
-                await asyncio.gather(*tasks)
+                # Wall-clock budgets keep the whole grade under the server's 120s
+                # analysis window even on huge, slow sites (Hays, Hudson). Priority
+                # pages (jobs/services/FAQ/about — they drive the detailed checks)
+                # are crawled first and always; the long tail fills coverage counts
+                # under a hard time cap, then we grade whatever we covered.
+                pri_budget = 25 if self.light else 40
+                rest_budget = 5 if self.light else 45
+
+                async def _run(coros, budget, flag):
+                    fs = [asyncio.ensure_future(c) for c in coros]
+                    if not fs:
+                        return
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.gather(*fs, return_exceptions=True), timeout=budget)
+                    except asyncio.TimeoutError:
+                        cov[flag] = True
+                        for f in fs:
+                            if not f.done():
+                                f.cancel()
+                        await asyncio.gather(*fs, return_exceptions=True)
+
+                await _run([crawl_one(u, j, True) for u, j in priority_urls],
+                           pri_budget, 'crawl_timed_out')
+                await _run([crawl_one(u, False, False) for u in rest_urls],
+                           rest_budget, 'crawl_timed_out')
         except Exception:
             pass
 
         cov['total_pages'] = self.total_pages or cov['pages_checked']
         cov['h1_missing'] = h1_missing
         cov['h1_multi'] = h1_multi
-        cov['crawl_capped'] = self.total_pages > self.CRAWL_CEILING
+        cov['crawl_capped'] = self.total_pages > cov['pages_checked']
         streams['sectors_employer'] = sorted(emp_sectors)
         streams['sectors_jobseeker'] = sorted(seek_sectors)
         streams['sectors_both'] = sorted(emp_sectors & seek_sectors)
@@ -649,10 +672,25 @@ class CareerSiteGrader:
         urls: List[str] = []
         seen = set()
         sm_timeout = aiohttp.ClientTimeout(total=10)
+        candidates = ['/sitemap.xml', '/sitemap_index.xml', '/sitemap-index.xml', '/sitemap']
+        # Many sites declare a non-standard sitemap path in robots.txt (e.g.
+        # /sitemaps/sitemap.xml). Read those first so we crawl the REAL sitemap.
         try:
-            for sm in ('/sitemap.xml', '/sitemap_index.xml', '/sitemap-index.xml', '/sitemap'):
+            async with sess.get(urljoin(self.base_url, '/robots.txt'), headers=self.HEADERS,
+                                timeout=sm_timeout) as rr:
+                if rr.status == 200:
+                    rtxt = await rr.text()
+                    for m in re.findall(r'(?im)^\s*sitemap:\s*(\S+)', rtxt)[:5]:
+                        m = m.strip()
+                        if m and m not in candidates:
+                            candidates.insert(0, m)
+        except Exception:
+            pass
+        try:
+            for sm in candidates:
+                sm_target = sm if sm.startswith('http') else urljoin(self.base_url, sm)
                 try:
-                    async with sess.get(urljoin(self.base_url, sm), headers=self.HEADERS,
+                    async with sess.get(sm_target, headers=self.HEADERS,
                                         timeout=sm_timeout) as resp:
                         if resp.status != 200:
                             continue
@@ -662,7 +700,7 @@ class CareerSiteGrader:
                 locs = re.findall(r'<loc>\s*([^<\s]+)\s*</loc>', body)
                 if locs:
                     self.has_sitemap = True
-                    self.sitemap_url = urljoin(self.base_url, sm)
+                    self.sitemap_url = sm_target
                     self.sitemap_is_index = '<sitemapindex' in body.lower()
                 if '<sitemapindex' in body.lower():
                     child_sitemaps = locs[:25]  # bound the number of child sitemaps
@@ -1372,9 +1410,16 @@ class CareerSiteGrader:
         sm_pts = 0; sm_notes = []
         if sm_present:
             sm_pts += 7
-            kind = 'sitemap index' if self.sitemap_is_index else 'sitemap.xml'
+            kind = 'sitemap index' if self.sitemap_is_index else 'sitemap'
             cnt = self.total_pages or 0
-            sm_notes.append(f'{kind} found ✓' + (f' ({cnt} URLs)' if cnt else ''))
+            where = ''
+            if self.sitemap_url:
+                p = urlparse(self.sitemap_url).path
+                if p and p != '/sitemap.xml':
+                    where = f' at {p}'
+            elif sm_in_robots:
+                where = ' (declared in robots.txt)'
+            sm_notes.append(f'{kind} found{where} ✓' + (f' ({cnt} URLs)' if cnt else ''))
             if sm_in_robots:
                 sm_pts += 3; sm_notes.append('referenced in robots.txt ✓')
             else:
