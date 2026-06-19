@@ -58,6 +58,7 @@ class CareerSiteGrader:
         self.extra_html: Dict[str, str] = {}
         self.extra_soups: Dict[str, BeautifulSoup] = {}
         self.job_routes_found: List[str] = []
+        self.pages_scanned: List[str] = []   # extra pages fetched beyond the homepage
         # Parsed JSON-LD cache
         self._schema_objects: Optional[List[dict]] = None
         self._schema_parse_errors = 0
@@ -194,6 +195,7 @@ class CareerSiteGrader:
             'core_web_vitals': self.pagespeed,
             'cwv_attempted': self.cwv_attempted,
             'authority': self.authority,
+            'pages_scanned': ['homepage'] + list(dict.fromkeys(self.pages_scanned)),
             'mode': self.mode,
             'progress': 100,
         }
@@ -366,21 +368,29 @@ class CareerSiteGrader:
             pass
 
     async def _fetch_recruitment_pages(self):
-        """Fetch the dedicated job routes that Shazamme/recruitment sites use so
-        that Apply-flow and Job-search detection isn't a false negative when the
-        homepage doesn't carry those widgets."""
-        paths = ['/job-results', '/job-detail', '/jobs', '/search-jobs',
-                 '/job-search', '/vacancies', '/careers', '/find-a-job']
+        """Fetch dedicated job routes AND key content pages (FAQ / about), plus any
+        FAQ/about/sector pages discovered in the sitemap — so page-level signals
+        (apply flow, FAQ schema, etc.) aren't false-negatived by only scanning the
+        homepage. The grade still reflects a *sample* of pages, surfaced as
+        pages_scanned so the scope is transparent."""
+        job_paths = ['/job-results', '/job-detail', '/jobs', '/search-jobs',
+                     '/job-search', '/vacancies', '/careers', '/find-a-job']
+        content_paths = ['/faq', '/faqs', '/frequently-asked-questions',
+                         '/about', '/about-us', '/help']
         try:
             ssl_ctx = ssl.create_default_context()
             ssl_ctx.check_hostname = False
             ssl_ctx.verify_mode = ssl.CERT_NONE
-            connector = aiohttp.TCPConnector(ssl=ssl_ctx, limit=8)
-            timeout = aiohttp.ClientTimeout(total=12, sock_read=8)
+            connector = aiohttp.TCPConnector(ssl=ssl_ctx, limit=10)
+            timeout = aiohttp.ClientTimeout(total=15, sock_read=8)
 
             async with aiohttp.ClientSession(connector=connector, timeout=timeout) as sess:
-                async def fetch_one(path):
-                    url = urljoin(self.base_url, path)
+                discovered = await self._discover_content_pages(sess)
+
+                async def fetch_one(path, is_job):
+                    url = path if path.startswith('http') else urljoin(self.base_url, path)
+                    if path in self.extra_html:
+                        return
                     try:
                         async with sess.get(url, headers=self.HEADERS, allow_redirects=True) as resp:
                             if resp.status == 200:
@@ -388,12 +398,57 @@ class CareerSiteGrader:
                                 if len(html) > 500:
                                     self.extra_html[path] = html
                                     self.extra_soups[path] = BeautifulSoup(html, 'html.parser')
-                                    self.job_routes_found.append(path)
+                                    if is_job:
+                                        self.job_routes_found.append(path)
+                                    self.pages_scanned.append(path)
                     except Exception:
                         pass
-                await asyncio.gather(*[fetch_one(p) for p in paths])
+
+                tasks = ([fetch_one(p, True) for p in job_paths]
+                         + [fetch_one(p, False) for p in content_paths]
+                         + [fetch_one(u, False) for u in discovered])
+                await asyncio.gather(*tasks)
         except Exception:
             pass
+
+    async def _discover_content_pages(self, sess) -> List[str]:
+        """Find FAQ/about/sector/service URLs in the sitemap so their page-level
+        schema (FAQPage, etc.) is included in the scan. Bounded + best-effort."""
+        pat = re.compile(r'faq|frequently.asked|about|service|sector|specialis|industr', re.I)
+        found: List[str] = []
+        try:
+            sm_timeout = aiohttp.ClientTimeout(total=8)
+            for sm in ('/sitemap.xml', '/sitemap_index.xml', '/sitemap-index.xml'):
+                try:
+                    async with sess.get(urljoin(self.base_url, sm), headers=self.HEADERS,
+                                        timeout=sm_timeout) as resp:
+                        if resp.status != 200:
+                            continue
+                        body = await resp.text()
+                except Exception:
+                    continue
+                locs = re.findall(r'<loc>\s*([^<\s]+)\s*</loc>', body)
+                # Sitemap index → peek into the first couple of child sitemaps
+                if '<sitemapindex' in body.lower():
+                    child_locs = []
+                    for child in locs[:3]:
+                        try:
+                            async with sess.get(child, headers=self.HEADERS, timeout=sm_timeout) as cr:
+                                if cr.status == 200:
+                                    child_locs += re.findall(r'<loc>\s*([^<\s]+)\s*</loc>', await cr.text())
+                        except Exception:
+                            continue
+                    locs = child_locs
+                for loc in locs:
+                    if pat.search(loc) and loc not in found:
+                        found.append(loc.strip())
+                    if len(found) >= 6:
+                        break
+                if found:
+                    break
+        except Exception:
+            pass
+        return found[:6]
 
     async def _fetch_pagespeed(self):
         """Google PageSpeed Insights v5 — Lighthouse lab metrics + CrUX field
@@ -1131,18 +1186,23 @@ class CareerSiteGrader:
                         'value': self.llm_info_url or None})
         score += pts; max_score += 10
 
-        # --- FAQ Schema ---
-        has_faq_schema = 'FAQPage' in schema_types
-        faq_html = bool(soup.find(class_=re.compile(r'faq|accordion|q.?a', re.I)))
-        faq_heading = bool(soup.find(lambda t: t.name in ['h2', 'h3'] and
-                                      re.search(r'faq|frequen|question', t.get_text(), re.I)))
+        # --- FAQ Schema (checked across every scanned page, not just the homepage) ---
+        has_faq_schema = ('FAQPage' in schema_types) or ('QAPage' in schema_types)
+        faq_html = faq_heading = False
+        for s in self._all_soups():
+            if not faq_html and s.find(class_=re.compile(r'faq|accordion|q.?a', re.I)):
+                faq_html = True
+            if not faq_heading and s.find(lambda t: t.name in ['h2', 'h3'] and
+                                          re.search(r'faq|frequen|question', t.get_text(), re.I)):
+                faq_heading = True
+        n_pages = 1 + len(self.extra_soups)
         faq_pts = 0; faq_notes = []
         if has_faq_schema:
             faq_pts += 15; faq_notes.append('FAQPage schema ✓ — eligible for Google FAQ rich results')
         else:
-            faq_notes.append('No FAQPage schema — AI engines love structured Q&A to surface in answers')
+            faq_notes.append(f'No FAQPage schema on the {n_pages} page(s) scanned — wrap your FAQ content in FAQPage JSON-LD')
         if faq_html or faq_heading:
-            faq_pts += 5; faq_notes.append('FAQ content detected in HTML ✓')
+            faq_pts += 5; faq_notes.append('FAQ content detected ✓ — add FAQPage schema to it')
         faq_pts = min(faq_pts, 20)
         checks.append({'name': 'FAQ & Q&A Schema', 'weight': 20, 'score': faq_pts, 'max': 20,
                         'status': self._pts_status(faq_pts, 20), 'detail': ' | '.join(faq_notes)})

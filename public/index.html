@@ -1089,6 +1089,10 @@ hr.section-divider {
             <span class="material-icons-round">http</span>
             Status: <strong id="res-status">—</strong>
           </div>
+          <div class="score-meta-item" id="res-pages-item" style="display:none" title="">
+            <span class="material-icons-round">description</span>
+            <strong id="res-pages">—</strong>&nbsp;pages analysed
+          </div>
         </div>
 
       </div>
@@ -1418,6 +1422,14 @@ function renderResults(data) {
   $('res-time').textContent  = data.response_time + 's';
   $('res-words').textContent = (data.word_count || 0).toLocaleString();
   $('res-status').textContent = data.status_code || '—';
+  if (data.pages_scanned && data.pages_scanned.length) {
+    $('res-pages').textContent = data.pages_scanned.length;
+    const item = $('res-pages-item');
+    item.style.display = '';
+    item.title = 'Pages analysed:\n' + data.pages_scanned.join('\n');
+  } else {
+    $('res-pages-item').style.display = 'none';
+  }
 
   // Scroll to top
   window.scrollTo({ top: 0, behavior: 'smooth' });
