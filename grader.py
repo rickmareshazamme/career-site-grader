@@ -23,7 +23,8 @@ class CareerSiteGrader:
         'Accept-Encoding': 'gzip, deflate, br',
     }
 
-    def __init__(self, url: str, mode: str = 'recruitment', light: bool = False):
+    def __init__(self, url: str, mode: str = 'recruitment', light: bool = False,
+                 bypass_cache: bool = False):
         self.raw_url = url
         self.url = self._normalize_url(url)
         self.parsed = urlparse(self.url)
@@ -31,6 +32,8 @@ class CareerSiteGrader:
         self.mode = mode
         # light mode skips the slow PageSpeed call (used for competitor benchmarks)
         self.light = light
+        # bypass_cache forces fresh authority (and skips cached fallbacks) — admin only
+        self.bypass_cache = bypass_cache
         self.psi_key = os.environ.get('PAGESPEED_API_KEY', '')
         self.enable_psi = os.environ.get('ENABLE_PAGESPEED', '1') != '0'
         self.pagespeed: Optional[Dict] = None
@@ -237,12 +240,14 @@ class CareerSiteGrader:
             domain = domain[4:]
 
         # Cache first — repeat grades / monitoring / competitors don't re-charge.
+        # Admin bypass forces a fresh provider lookup.
         try:
             import db as _db
-            cached = _db.get_authority(domain)
-            if cached:
-                self.authority = cached
-                return
+            if not self.bypass_cache:
+                cached = _db.get_authority(domain)
+                if cached:
+                    self.authority = cached
+                    return
         except Exception:
             _db = None
 

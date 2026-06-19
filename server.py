@@ -47,11 +47,24 @@ def _report_link(report_id):
     return f'{PUBLIC_BASE_URL}/r/{report_id}' if report_id else PUBLIC_BASE_URL
 
 
+def _admin_token():
+    return os.environ.get('ADMIN_TOKEN', '') or os.environ.get('CRON_TOKEN', '')
+
+
+def _bypass_requested():
+    """Super-admin cache bypass: ?fresh=1&token=ADMIN_TOKEN (or CRON_TOKEN)."""
+    if request.args.get('fresh', '') not in ('1', 'true', 'yes'):
+        return False
+    tok = (request.args.get('token') or '').strip()
+    expected = _admin_token()
+    return bool(expected) and tok == expected
+
+
 def _pillar_scores(complete_event):
     return {k: v['score'] for k, v in complete_event.get('pillars', {}).items()}
 
 
-def _persist_and_enrich(event, fallback_url, mode):
+def _persist_and_enrich(event, fallback_url, mode, bypass=False):
     """Save the grade, attach benchmark, and cache / restore Core Web Vitals.
     Best-effort: never raises into the grading path."""
     domain = event.get('domain', '')
@@ -72,7 +85,7 @@ def _persist_and_enrich(event, fallback_url, mode):
         cwv = event.get('core_web_vitals')
         if cwv and cwv.get('perf_score') is not None:
             db.save_cwv(graded_url, mode, cwv)
-        elif event.get('cwv_attempted'):
+        elif event.get('cwv_attempted') and not bypass:
             cached = db.get_cwv(graded_url, mode)
             if cached:
                 event['core_web_vitals'] = cached
@@ -121,16 +134,16 @@ async def _build_comparison(competitor_urls, mode, target_event) -> dict:
     return {'target': target, 'competitors': results, 'rank': rank, 'field_size': len(scored) + 1}
 
 
-def run_grader_in_thread(url: str, mode: str, competitors, q: queue.Queue):
+def run_grader_in_thread(url: str, mode: str, competitors, q: queue.Queue, bypass=False):
     """Run the async grader in a background thread and push events to queue."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
     async def collect():
-        grader = CareerSiteGrader(url, mode=mode)
+        grader = CareerSiteGrader(url, mode=mode, bypass_cache=bypass)
         async for event in grader.grade():
             if event.get('type') == 'complete':
-                _persist_and_enrich(event, url, mode)
+                _persist_and_enrich(event, url, mode, bypass=bypass)
                 if competitors:
                     q.put({'type': 'status', 'message': f'Benchmarking against {len(competitors)} competitor(s)...', 'progress': 99})
                     try:
@@ -175,9 +188,11 @@ def grade():
     raw_comp = (request.args.get('competitors') or '').strip()
     competitors = [c.strip() for c in raw_comp.split(',') if c.strip()][:3] if raw_comp else []
 
+    bypass = _bypass_requested()
+
     def generate():
         q: queue.Queue = queue.Queue()
-        t = threading.Thread(target=run_grader_in_thread, args=(url, mode, competitors, q), daemon=True)
+        t = threading.Thread(target=run_grader_in_thread, args=(url, mode, competitors, q, bypass), daemon=True)
         t.start()
 
         while True:
@@ -303,7 +318,7 @@ def api_cwv():
     if not url:
         return jsonify({'error': 'url required'}), 400
 
-    cached = db.get_cwv(url, mode)
+    cached = None if _bypass_requested() else db.get_cwv(url, mode)
     status = 'ready' if cached else 'pending'
     if not cached:
         key = (url, mode)
@@ -326,11 +341,12 @@ def api_grade():
     if mode not in VALID_MODES:
         return jsonify({'error': f'mode must be one of: {", ".join(VALID_MODES)}'}), 400
 
+    bypass = _bypass_requested()
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
     async def run():
-        grader = CareerSiteGrader(url, mode=mode)
+        grader = CareerSiteGrader(url, mode=mode, bypass_cache=bypass)
         final = None
         async for ev in grader.grade():
             if ev.get('type') == 'error':
@@ -345,7 +361,7 @@ def api_grade():
         loop.close()
     if not result or 'error' in (result or {}):
         return jsonify(result or {'error': 'no result'}), 502
-    _persist_and_enrich(result, url, mode)
+    _persist_and_enrich(result, url, mode, bypass=bypass)
     try:
         db.save_report(result['report_id'], result.get('url', url), mode, result)
     except Exception:
