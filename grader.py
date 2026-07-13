@@ -837,8 +837,39 @@ class CareerSiteGrader:
                 'fcp': field('FIRST_CONTENTFUL_PAINT_MS'),
             },
             'has_field': bool(le),
+            'issues': self._parse_psi_issues(audits),
         }
         return result
+
+    @staticmethod
+    def _parse_psi_issues(audits: dict) -> List[Dict]:
+        """Failing Lighthouse audits, biggest estimated savings first — the same
+        'opportunities' PageSpeed's own report lists. Kept small (top 8) since
+        the whole payload is cached per URL."""
+        issues = []
+        for aid, a in audits.items():
+            score = a.get('score')
+            if score is None or score >= 0.9:
+                continue
+            if a.get('scoreDisplayMode') not in ('binary', 'numeric', 'metricSavings'):
+                continue
+            det = a.get('details') or {}
+            savings = det.get('overallSavingsMs')
+            if savings is None:
+                ms = a.get('metricSavings') or {}
+                total = sum(v for v in ms.values() if isinstance(v, (int, float)))
+                savings = total or None
+            doc = re.search(r'\((https?://[^)\s]+)\)', a.get('description') or '')
+            issues.append({
+                'id': aid,
+                'title': a.get('title'),
+                'display': a.get('displayValue'),
+                'savings_ms': round(savings) if isinstance(savings, (int, float)) else None,
+                'doc': doc.group(1) if doc else None,
+                'score': score,
+            })
+        issues.sort(key=lambda i: (-(i['savings_ms'] or 0), i['score']))
+        return issues[:8]
 
     # -------------------------------------------------------------------------
     # Helpers

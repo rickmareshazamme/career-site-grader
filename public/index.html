@@ -594,6 +594,12 @@ body {
 .cwv-perf-score { font-size: 38px; font-weight: 800; line-height: 1; }
 .cwv-perf-label { font-size: 11px; color: var(--text3); line-height: 1.3; }
 .cwv-perf-range { font-size: 10px; color: var(--text3); opacity: .8; }
+.cwv-issues { flex-basis: 100%; font-size: 13px; margin-top: 2px; }
+.cwv-issues summary { cursor: pointer; color: var(--cyan); font-weight: 600; font-size: 12px; }
+.cwv-issues ul { margin: 10px 0 6px 18px; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.cwv-issues a { color: var(--text1); text-decoration: underline; text-decoration-color: var(--text3); }
+.cwv-issue-detail { color: var(--text3); font-size: 12px; }
+.cwv-full-report { font-size: 12px; color: var(--cyan) !important; text-decoration: none !important; }
 .cwv-metrics { display: flex; gap: 28px; flex-wrap: wrap; }
 .cwv-metric { min-width: 90px; }
 .cwv-metric-label { font-size: 12px; color: var(--text2); font-weight: 600; }
@@ -1617,7 +1623,25 @@ function cwvBadge(rating) {
   return `<span class="cwv-badge" style="background:${m[1]}1f;color:${m[1]}">${m[0]}</span>`;
 }
 
-function cwvDeviceCardHtml(d, label, icon) {
+function cwvIssuesHtml(d, url, formFactor) {
+  const issues = d.issues || [];
+  if (!issues.length) return '';
+  const psi = 'https://pagespeed.web.dev/analysis?url=' + encodeURIComponent(url) + '&form_factor=' + formFactor;
+  const items = issues.map(i => {
+    const title = i.doc
+      ? `<a href="${escHtml(i.doc)}" target="_blank" rel="noopener">${escHtml(i.title)}</a>`
+      : escHtml(i.title);
+    return `<li>${title}${i.display ? ` <span class="cwv-issue-detail">${escHtml(i.display)}</span>` : ''}</li>`;
+  }).join('');
+  return `
+    <details class="cwv-issues">
+      <summary>${issues.length} improvement${issues.length > 1 ? 's' : ''} to raise this score — click to view</summary>
+      <ul>${items}</ul>
+      <a class="cwv-full-report" href="${escHtml(psi)}" target="_blank" rel="noopener">Full PageSpeed report ↗</a>
+    </details>`;
+}
+
+function cwvDeviceCardHtml(d, label, icon, url) {
   const f = d.field || {};
   const lab = d.lab || {};
   const fmtMs = v => (v == null ? '—' : (v / 1000).toFixed(2) + 's');
@@ -1642,15 +1666,16 @@ function cwvDeviceCardHtml(d, label, icon) {
         ${metric('INP <small>responsiveness</small>', f.inp, lab.tbt_ms, 'ms')}
         ${metric('CLS <small>visual stability</small>', f.cls, lab.cls, 'cls')}
       </div>
+      ${cwvIssuesHtml(d, url, label === 'Desktop' ? 'desktop' : 'mobile')}
     </div>`;
 }
 
-function cwvCardHtml(cwv) {
+function cwvCardHtml(cwv, url) {
   let stale = '';
   if (cwv.stale && cwv.measured_at) stale = 'last measured ' + timeAgo(cwv.measured_at);
-  let cards = cwvDeviceCardHtml(cwv, 'Mobile', 'smartphone');
+  let cards = cwvDeviceCardHtml(cwv, 'Mobile', 'smartphone', url);
   const d = cwv.desktop;
-  if (d && (d.perf_score != null || d.has_field)) cards += cwvDeviceCardHtml(d, 'Desktop', 'desktop_windows');
+  if (d && (d.perf_score != null || d.has_field)) cards += cwvDeviceCardHtml(d, 'Desktop', 'desktop_windows', url);
   return `
     <hr class="section-divider">
     <div class="section-title"><span class="material-icons-round">speed</span> Core Web Vitals <span class="cwv-src">${escHtml(stale)}</span></div>
@@ -1681,7 +1706,7 @@ let _cwvReqId = 0;
 function renderCWV(cwv, attempted, url, mode) {
   const box = $('cwv-section');
   const hasData = cwv && (cwv.perf_score != null || cwv.has_field);
-  if (hasData) { box.style.display = ''; box.innerHTML = cwvCardHtml(cwv); return; }
+  if (hasData) { box.style.display = ''; box.innerHTML = cwvCardHtml(cwv, url); return; }
   if (!attempted) { box.style.display = 'none'; return; }
   // Grade didn't capture CWV in time — poll for it off the critical path.
   box.style.display = '';
@@ -1696,7 +1721,7 @@ function pollCwv(url, mode, tries, myId) {
     .then(j => {
       if (myId !== _cwvReqId) return; // superseded by a newer grade
       const c = j && j.core_web_vitals;
-      if (c && (c.perf_score != null || c.has_field)) { box.innerHTML = cwvCardHtml(c); return; }
+      if (c && (c.perf_score != null || c.has_field)) { box.innerHTML = cwvCardHtml(c, url); return; }
       if (tries < 30) { setTimeout(() => { if (myId === _cwvReqId) pollCwv(url, mode, tries + 1, myId); }, 5000); }
       else { box.innerHTML = cwvNoteHtml(); }
     })
