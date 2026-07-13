@@ -593,6 +593,7 @@ body {
 .cwv-perf { display: flex; align-items: center; gap: 10px; padding-right: 24px; border-right: 1px solid var(--border); }
 .cwv-perf-score { font-size: 38px; font-weight: 800; line-height: 1; }
 .cwv-perf-label { font-size: 11px; color: var(--text3); line-height: 1.3; }
+.cwv-perf-range { font-size: 10px; color: var(--text3); opacity: .8; }
 .cwv-metrics { display: flex; gap: 28px; flex-wrap: wrap; }
 .cwv-metric { min-width: 90px; }
 .cwv-metric-label { font-size: 12px; color: var(--text2); font-weight: 600; }
@@ -1628,8 +1629,10 @@ function cwvDeviceCardHtml(d, label, icon) {
     return `<div class="cwv-metric"><div class="cwv-metric-label">${mLabel}</div><div class="cwv-metric-val">${val}</div>${rating}</div>`;
   };
   const src = d.has_field ? 'Real Chrome user data (CrUX)' : 'Lighthouse lab test';
+  const range = d.runs > 1 && d.perf_min != null && d.perf_max != null
+    ? `<br><span class="cwv-perf-range">median of ${d.runs} runs${d.perf_max > d.perf_min ? ` · ${d.perf_min}–${d.perf_max}` : ''}</span>` : '';
   const perf = d.perf_score != null
-    ? `<div class="cwv-perf"><div class="cwv-perf-score" style="color:${gradeColor(d.perf_score)}">${d.perf_score}</div><div class="cwv-perf-label">Lighthouse<br>Performance</div></div>` : '';
+    ? `<div class="cwv-perf"><div class="cwv-perf-score" style="color:${gradeColor(d.perf_score)}">${d.perf_score}</div><div class="cwv-perf-label">Lighthouse<br>Performance${range}</div></div>` : '';
   return `
     <div class="cwv-card">
       <div class="cwv-device"><span class="material-icons-round">${icon}</span> ${label} <span class="cwv-src">${escHtml(src)}</span></div>

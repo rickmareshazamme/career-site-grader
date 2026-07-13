@@ -36,6 +36,10 @@ class CareerSiteGrader:
         self.bypass_cache = bypass_cache
         self.psi_key = os.environ.get('PAGESPEED_API_KEY', '')
         self.enable_psi = os.environ.get('ENABLE_PAGESPEED', '1') != '0'
+        try:
+            self.psi_runs = min(5, max(1, int(os.environ.get('PSI_RUNS', '3'))))
+        except ValueError:
+            self.psi_runs = 3
         self.pagespeed: Optional[Dict] = None
         self.cwv_attempted = False
         self._psi_task = None
@@ -732,18 +736,40 @@ class CareerSiteGrader:
 
         Mobile and desktop run concurrently. Mobile stays the primary result
         (it drives scoring and is what Google ranks on); desktop rides along
-        under a 'desktop' key for display and is dropped silently on failure."""
+        under a 'desktop' key for display and is dropped silently on failure.
+
+        Lighthouse lab scores swing run-to-run (shared test hardware,
+        third-party script timing), so each strategy is measured psi_runs
+        times in parallel and the median-scored run is kept, with the
+        observed min/max attached so the UI can show the spread."""
         self.cwv_attempted = True
-        mobile, desktop = await asyncio.gather(
-            self._fetch_psi_strategy('mobile'),
-            self._fetch_psi_strategy('desktop'),
-        )
+        runs = max(1, self.psi_runs)
+        results = await asyncio.gather(
+            *([self._fetch_psi_strategy('mobile') for _ in range(runs)]
+              + [self._fetch_psi_strategy('desktop') for _ in range(runs)]))
+        mobile = self._median_psi(results[:runs])
+        desktop = self._median_psi(results[runs:])
         if mobile and mobile.get('perf_score') is not None:
             if desktop and desktop.get('perf_score') is not None:
                 mobile['desktop'] = desktop
             self.pagespeed = mobile
         else:
             self.pagespeed = None
+
+    @staticmethod
+    def _median_psi(runs: List[Optional[Dict]]) -> Optional[Dict]:
+        ok = sorted((r for r in runs if r and r.get('perf_score') is not None),
+                    key=lambda r: r['perf_score'])
+        if not ok:
+            return None
+        # Even count: take the lower-middle run rather than averaging, so the
+        # reported lab metrics always come from one coherent Lighthouse run.
+        mid = len(ok) // 2 if len(ok) % 2 else len(ok) // 2 - 1
+        chosen = dict(ok[mid])
+        chosen['runs'] = len(ok)
+        chosen['perf_min'] = ok[0]['perf_score']
+        chosen['perf_max'] = ok[-1]['perf_score']
+        return chosen
 
     async def _fetch_psi_strategy(self, strategy: str) -> Optional[Dict]:
         endpoint = 'https://www.googleapis.com/pagespeedonline/v5/runPagespeed'
