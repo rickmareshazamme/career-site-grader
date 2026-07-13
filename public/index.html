@@ -584,6 +584,10 @@ body {
 
 /* Core Web Vitals */
 .cwv-src { font-size: 11px; font-weight: 500; color: var(--text3); margin-left: 8px; }
+.cwv-device { flex-basis: 100%; display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700;
+  color: var(--text2); text-transform: uppercase; letter-spacing: .05em; }
+.cwv-device .material-icons-round { font-size: 16px; color: var(--text3); }
+.cwv-card + .cwv-card { margin-top: 12px; }
 .cwv-card { display: flex; gap: 24px; align-items: center; flex-wrap: wrap;
   background: rgba(255,255,255,0.03); border: 1px solid var(--border); border-radius: 14px; padding: 20px 24px; }
 .cwv-perf { display: flex; align-items: center; gap: 10px; padding-right: 24px; border-right: 1px solid var(--border); }
@@ -1612,25 +1616,23 @@ function cwvBadge(rating) {
   return `<span class="cwv-badge" style="background:${m[1]}1f;color:${m[1]}">${m[0]}</span>`;
 }
 
-function cwvCardHtml(cwv) {
-  const f = cwv.field || {};
-  const lab = cwv.lab || {};
+function cwvDeviceCardHtml(d, label, icon) {
+  const f = d.field || {};
+  const lab = d.lab || {};
   const fmtMs = v => (v == null ? '—' : (v / 1000).toFixed(2) + 's');
-  const metric = (label, fieldObj, labVal, unit) => {
+  const metric = (mLabel, fieldObj, labVal, unit) => {
     const p75 = fieldObj && fieldObj.p75 != null ? fieldObj.p75 : null;
-    const val = p75 != null ? (unit === 'cls' ? (p75 / 100).toFixed(2) : fmtMs(p75))
+    const val = p75 != null ? (unit === 'cls' ? p75.toFixed(2) : fmtMs(p75))
                             : (labVal != null ? (unit === 'cls' ? labVal.toFixed(2) : fmtMs(labVal)) : '—');
     const rating = fieldObj && fieldObj.rating ? cwvBadge(fieldObj.rating) : '';
-    return `<div class="cwv-metric"><div class="cwv-metric-label">${label}</div><div class="cwv-metric-val">${val}</div>${rating}</div>`;
+    return `<div class="cwv-metric"><div class="cwv-metric-label">${mLabel}</div><div class="cwv-metric-val">${val}</div>${rating}</div>`;
   };
-  let src = cwv.has_field ? 'Real Chrome user data (CrUX)' : 'Lighthouse lab test';
-  if (cwv.stale && cwv.measured_at) src += ' · last measured ' + timeAgo(cwv.measured_at);
-  const perf = cwv.perf_score != null
-    ? `<div class="cwv-perf"><div class="cwv-perf-score" style="color:${gradeColor(cwv.perf_score)}">${cwv.perf_score}</div><div class="cwv-perf-label">Lighthouse<br>Performance</div></div>` : '';
+  const src = d.has_field ? 'Real Chrome user data (CrUX)' : 'Lighthouse lab test';
+  const perf = d.perf_score != null
+    ? `<div class="cwv-perf"><div class="cwv-perf-score" style="color:${gradeColor(d.perf_score)}">${d.perf_score}</div><div class="cwv-perf-label">Lighthouse<br>Performance</div></div>` : '';
   return `
-    <hr class="section-divider">
-    <div class="section-title"><span class="material-icons-round">speed</span> Core Web Vitals <span class="cwv-src">${escHtml(src)}</span></div>
     <div class="cwv-card">
+      <div class="cwv-device"><span class="material-icons-round">${icon}</span> ${label} <span class="cwv-src">${escHtml(src)}</span></div>
       ${perf}
       <div class="cwv-metrics">
         ${metric('LCP <small>loading</small>', f.lcp, lab.lcp_ms, 'ms')}
@@ -1638,6 +1640,18 @@ function cwvCardHtml(cwv) {
         ${metric('CLS <small>visual stability</small>', f.cls, lab.cls, 'cls')}
       </div>
     </div>`;
+}
+
+function cwvCardHtml(cwv) {
+  let stale = '';
+  if (cwv.stale && cwv.measured_at) stale = 'last measured ' + timeAgo(cwv.measured_at);
+  let cards = cwvDeviceCardHtml(cwv, 'Mobile', 'smartphone');
+  const d = cwv.desktop;
+  if (d && (d.perf_score != null || d.has_field)) cards += cwvDeviceCardHtml(d, 'Desktop', 'desktop_windows');
+  return `
+    <hr class="section-divider">
+    <div class="section-title"><span class="material-icons-round">speed</span> Core Web Vitals <span class="cwv-src">${escHtml(stale)}</span></div>
+    ${cards}`;
 }
 
 function cwvMeasuringHtml() {

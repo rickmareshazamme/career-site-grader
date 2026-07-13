@@ -728,13 +728,29 @@ class CareerSiteGrader:
         data (real Core Web Vitals from Chrome users). Optional and best-effort:
         degrades silently to TTFB-only if no key / quota / timeout. Lighthouse
         also fully renders the page, giving us a rendered-DOM performance signal
-        the static fetch cannot measure."""
+        the static fetch cannot measure.
+
+        Mobile and desktop run concurrently. Mobile stays the primary result
+        (it drives scoring and is what Google ranks on); desktop rides along
+        under a 'desktop' key for display and is dropped silently on failure."""
         self.cwv_attempted = True
+        mobile, desktop = await asyncio.gather(
+            self._fetch_psi_strategy('mobile'),
+            self._fetch_psi_strategy('desktop'),
+        )
+        if mobile and mobile.get('perf_score') is not None:
+            if desktop and desktop.get('perf_score') is not None:
+                mobile['desktop'] = desktop
+            self.pagespeed = mobile
+        else:
+            self.pagespeed = None
+
+    async def _fetch_psi_strategy(self, strategy: str) -> Optional[Dict]:
         endpoint = 'https://www.googleapis.com/pagespeedonline/v5/runPagespeed'
         # Only request the 'performance' category — it carries the perf score +
         # Core Web Vitals. Requesting all four categories ~3-4x's the Lighthouse
         # run time and times out on heavy sites.
-        params = [('url', self.url), ('strategy', 'mobile'), ('category', 'performance')]
+        params = [('url', self.url), ('strategy', strategy), ('category', 'performance')]
         if self.psi_key:
             params.append(('key', self.psi_key))
         # Lighthouse run time varies; retry per configured timeouts.
@@ -748,11 +764,10 @@ class CareerSiteGrader:
                         data = await resp.json()
                 parsed = self._parse_pagespeed(data)
                 if parsed and parsed.get('perf_score') is not None:
-                    self.pagespeed = parsed
-                    return
+                    return parsed
             except Exception:
                 continue
-        self.pagespeed = None
+        return None
 
     def _parse_pagespeed(self, data: dict) -> Optional[Dict]:
         lr = data.get('lighthouseResult', {})
