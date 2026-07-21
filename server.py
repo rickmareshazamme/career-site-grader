@@ -325,12 +325,17 @@ def api_cwv():
         return jsonify({'error': 'url required'}), 400
 
     cached = None if _bypass_requested() else db.get_cwv(url, mode)
+    # A cached blob missing its desktop reading is incomplete (an earlier
+    # desktop-drop poisoned it): keep serving the mobile data we have, but kick a
+    # background re-measure to backfill desktop so the card heals on next view.
+    needs_measure = (cached is None) or (not cached.get('desktop'))
     status = 'ready' if cached else 'pending'
-    if not cached:
+    if needs_measure:
         # Only spawn a (billable) PageSpeed job for URLs that were actually graded,
         # rate-limited at spawn time — prevents anonymous PSI-cost abuse via ?url=.
         if not db.url_graded(url, mode):
-            status = 'unavailable'
+            if not cached:
+                status = 'unavailable'
         else:
             key = (url, mode)
             with _cwv_lock:
@@ -339,7 +344,7 @@ def api_cwv():
                 elif _rate_ok('cwv', limit=60):
                     _cwv_jobs.add(key)
                     threading.Thread(target=_measure_cwv_bg, args=(url, mode), daemon=True).start()
-                else:
+                elif not cached:
                     status = 'unavailable'
     resp = jsonify({'status': status, 'core_web_vitals': cached})
     resp.headers['Access-Control-Allow-Origin'] = '*'

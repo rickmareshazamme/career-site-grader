@@ -223,11 +223,28 @@ def mark_monitor_run(monitor_id: int):
 
 def save_cwv(url: str, mode: str, cwv: Dict) -> bool:
     """Cache the last successful Core Web Vitals for a URL so a later timed-out
-    PageSpeed run can fall back to it instead of showing nothing."""
+    PageSpeed run can fall back to it instead of showing nothing.
+
+    Desktop CWV is dropped silently whenever its PageSpeed runs fail (throttle,
+    timeout, or daily-quota 429). Without protection, one such run would write a
+    desktop-less blob over a previously-good one and — because /api/cwv serves
+    cache without re-measuring — the desktop card would stay gone for good. So a
+    blob missing 'desktop' never clobbers a cached desktop reading; it carries
+    the prior desktop forward instead."""
     if not _ENABLED or not cwv:
         return False
     try:
         with _LOCK, _connect() as conn:
+            if not cwv.get('desktop'):
+                row = conn.execute('SELECT cwv_json FROM cwv WHERE url=? AND mode=?',
+                                   (url, mode)).fetchone()
+                if row:
+                    try:
+                        prev = json.loads(row['cwv_json'])
+                    except Exception:
+                        prev = {}
+                    if prev.get('desktop'):
+                        cwv = {**cwv, 'desktop': prev['desktop']}
             conn.execute(
                 'INSERT INTO cwv (url, mode, cwv_json, created_at) VALUES (?,?,?,?) '
                 'ON CONFLICT(url, mode) DO UPDATE SET cwv_json=excluded.cwv_json, created_at=excluded.created_at',
